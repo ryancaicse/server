@@ -996,6 +996,7 @@ static ha_rows find_all_keys(THD *thd, Sort_param *param, SQL_SELECT *select,
     if (!write_record)
       file->unlock_row();
   }
+
   if (!quick_select)
   {
     (void) file->extra(HA_EXTRA_NO_CACHE);	/* End caching of records */

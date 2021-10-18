@@ -73,6 +73,7 @@ public:
   /* Unpack temp table columns to base table columns*/
   void (*unpack)(TABLE *);
 
+
   Filesort(ORDER *order_arg, ha_rows limit_arg, bool sort_positions_arg,
            SQL_SELECT *select_arg):
     order(order_arg),
