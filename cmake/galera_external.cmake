@@ -1,0 +1,75 @@
+# EXT_GALERA_PATH 
+# a path to built galera git tree 
+# or a path to unpacked binary tarball 
+
+IF(WIN32 OR NOT EXT_GALERA_PATH)
+  RETURN()
+ENDIF()
+
+IF(NOT EXISTS ${EXT_GALERA_PATH})
+  MESSAGE(FATAL_ERROR "Galera dir ${EXT_GALERA_PATH} does not exist!")
+ENDIF()
+
+SET(GALERA_PATH ${CMAKE_SOURCE_DIR}/GALERASYM)
+IF(EXISTS ${GALERA_PATH})
+  FILE({REMOVE ${GALERA_PATH})
+ENDIF()
+EXECUTE_PROCESS(COMMAND ${CMAKE_COMMAND} -E create_symlink ${EXT_GALERA_PATH} ${GALERA_PATH})
+
+FIND_LIBRARY(GALERA_LIB
+  NAMES galera_smm galera_enterprise_smm
+  PATHS ${GALERA_PATH}
+  NO_DEFAULT_PATH
+  )
+
+IF(NOT GALERA_LIB)
+  MESSAGE(FATAL_ERROR "Galera library not found in ${GALERA_PATH}")
+ENDIF()
+
+INSTALL(PROGRAMS
+  ${GALERA_LIB}
+  DESTINATION lib
+  RENAME libgalera_smm.so
+  COMPONENT Server
+  )
+
+INSTALL(PROGRAMS
+  ${GALERA_PATH}/garb/garbd
+  DESTINATION bin
+  COMPONENT Server
+  )
+
+INSTALL(PROGRAMS
+  ${GALERA_PATH}/garb/files/garb-systemd
+  DESTINATION bin
+  COMPONENT Server
+  )
+
+INSTALL(FILES
+  ${GALERA_PATH}/garb/files/garb.cnf
+  DESTINATION docs/galera
+  COMPONENT Server
+  )
+
+INSTALL(FILES
+  ${GALERA_PATH}/AUTHORS
+  ${GALERA_PATH}/COPYING
+  ${GALERA_PATH}/README
+  DESTINATION docs/galera/doc
+  COMPONENT Server
+  )
+
+INSTALL(FILES
+  ${GALERA_PATH}/asio/LICENSE_1_0.txt
+  DESTINATION docs/galera/doc
+  RENAME LICENSE.asio
+  COMPONENT Server
+  )
+
+INSTALL(FILES
+  ${GALERA_PATH}/chromium/LICENSE
+  DESTINATION docs/galera/doc
+  RENAME LICENSE.chromium
+  COMPONENT Server
+  )
+
