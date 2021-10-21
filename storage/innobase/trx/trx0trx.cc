@@ -1637,7 +1637,7 @@ trx_mark_sql_stat_end(
 			/* MDEV-25036 FIXME */
 			/* InnoDB supports buffered insert only
 			for the first insert statement */
-			//trx->bulk_insert_apply();
+			trx->bulk_insert_apply();
 			/* Allow a subsequent INSERT into an empty table
 			if !unique_checks && !foreign_key_checks. */
 			return;

@@ -3368,13 +3368,12 @@ row_ins_index_entry(
 			DBUG_SET("-d,row_ins_index_entry_timeout");
 			return(DB_LOCK_WAIT);});
 
-#if 0
 	auto it= thr_get_trx(thr)->check_bulk_buffer(index->table);
 	if (it) {
 		return it->bulk_insert_buffered(
 				entry, index, thr_get_trx(thr));
 	}
-#endif
+
 	if (index->is_primary()) {
 		return row_ins_clust_index_entry(index, entry, thr, 0);
 	} else {
