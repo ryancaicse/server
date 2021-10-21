@@ -5156,7 +5156,8 @@ dberr_t row_merge_bulk_t::write_to_index(ulint index_no, trx_t *trx)
 {
   dberr_t err= DB_SUCCESS;
   row_merge_buf_t buf= m_merge_buf[index_no];
-  merge_file_t *file= &m_merge_files[index_no];
+  merge_file_t *file= m_merge_files ?
+    &m_merge_files[index_no] : nullptr;
   dict_index_t *index= buf.index;
   dict_table_t *table= index->table;
   BtrBulk btr_bulk(index, trx);

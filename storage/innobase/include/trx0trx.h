@@ -1092,7 +1092,7 @@ public:
   @return DB_SUCCESS or error code */
   dberr_t bulk_insert_apply()
   {
-    if (!bulk_insert)
+    if (UNIV_LIKELY(!bulk_insert))
       return DB_SUCCESS;
     ut_ad(!check_unique_secondary);
     ut_ad(!check_foreigns);
