@@ -657,7 +657,7 @@ bool mysql_delete(THD *thd, TABLE_LIST *table_list, COND *conds,
   if (query_plan.using_filesort)
   {
     {
-      Filesort fsort(order, HA_POS_ERROR, true, select, true);
+      Filesort fsort(order, HA_POS_ERROR, true, select);
       DBUG_ASSERT(query_plan.index == MAX_KEY);
 
       Filesort_tracker *fs_tracker=

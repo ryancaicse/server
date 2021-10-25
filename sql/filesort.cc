@@ -45,8 +45,7 @@ static ha_rows find_all_keys(THD *thd, Sort_param *param, SQL_SELECT *select,
                              IO_CACHE *buffer_file,
                              IO_CACHE *tempfile,
                              Bounded_queue<uchar, uchar> *pq,
-                             ha_rows *found_rows,
-                             bool modify_m_current_row_for_warning);
+                             ha_rows *found_rows);
 static bool write_keys(Sort_param *param, SORT_INFO *fs_info,
                       uint count, IO_CACHE *buffer_file, IO_CACHE *tempfile);
 static uint make_sortkey(Sort_param *param, uchar *to, uchar *ref_pos,
@@ -360,8 +359,7 @@ SORT_INFO *filesort(THD *thd, TABLE *table, Filesort *filesort,
                           &buffpek_pointers,
                           &tempfile, 
                           pq.is_initialized() ? &pq : NULL,
-                          &sort->found_rows,
-                          filesort->modify_m_current_row_for_warning);
+                          &sort->found_rows);
   if (num_rows == HA_POS_ERROR)
     goto err;
 
@@ -835,8 +833,7 @@ static ha_rows find_all_keys(THD *thd, Sort_param *param, SQL_SELECT *select,
                              IO_CACHE *buffpek_pointers,
                              IO_CACHE *tempfile,
                              Bounded_queue<uchar, uchar> *pq,
-                             ha_rows *found_rows,
-                             bool modify_m_current_row_for_warning)
+                             ha_rows *found_rows)
 {
   int error, quick_select;
   uint idx, indexpos;
@@ -909,8 +906,6 @@ static ha_rows find_all_keys(THD *thd, Sort_param *param, SQL_SELECT *select,
 
   for (;;)
   {
-    if (modify_m_current_row_for_warning)
-      thd->get_stmt_da()->inc_current_row_for_warning();
     if (quick_select)
       error= select->quick->get_next();
     else					/* Not quick-select */
@@ -1001,8 +996,6 @@ static ha_rows find_all_keys(THD *thd, Sort_param *param, SQL_SELECT *select,
     if (!write_record)
       file->unlock_row();
   }
-  if (modify_m_current_row_for_warning)
-    thd->get_stmt_da()->reset_current_row_for_warning(0);
 
   if (!quick_select)
   {
