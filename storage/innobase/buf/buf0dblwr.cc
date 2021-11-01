@@ -521,8 +521,9 @@ static void buf_dblwr_check_page_lsn(const buf_page_t &b, const byte *page)
 /** Check the LSN values on the page with which this block is associated. */
 static void buf_dblwr_check_block(const buf_page_t *bpage)
 {
-  ut_ad(bpage->state() == BUF_BLOCK_FILE_PAGE);
+  ut_ad(bpage->state() == BUF_BLOCK_LRU);
   const page_t *page= bpage->frame;
+  ut_ad(page);
 
   switch (fil_page_get_type(page)) {
   case FIL_PAGE_INDEX:
@@ -666,7 +667,6 @@ void buf_dblwr_t::flush_buffered_writes_completed(const IORequest &request)
     }
     else
     {
-      ut_ad(bpage->state() == BUF_BLOCK_FILE_PAGE);
       ut_ad(!bpage->zip_size());
       ut_d(buf_dblwr_check_page_lsn(*bpage, static_cast<const byte*>(frame)));
     }

@@ -4019,8 +4019,7 @@ not_encrypted:
 			if ((err = callback(block)) != DB_SUCCESS) {
 				goto func_exit;
 			} else if (!updated) {
-				updated = block->page.state()
-					== BUF_BLOCK_FILE_PAGE;
+				updated = !!block->page.frame;
 			}
 
 			/* If tablespace is encrypted we use additional
@@ -4228,7 +4227,7 @@ fil_tablespace_iterate(
 	buf_block_t* block = reinterpret_cast<buf_block_t*>
 		(ut_zalloc_nokey(sizeof *block));
 	block->page.frame = page;
-        block->page.init(BUF_BLOCK_FILE_PAGE, page_id_t(~0ULL), 1);
+	block->page.init(BUF_BLOCK_LRU, page_id_t(~0ULL), 1);
 
 	/* Read the first page and determine the page and zip size. */
 

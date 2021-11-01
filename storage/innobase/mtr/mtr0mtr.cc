@@ -495,7 +495,8 @@ struct Shrink
         break;
       }
       ut_ad(id.space() == high.space());
-      ut_ad(bpage.state() == BUF_BLOCK_FILE_PAGE);
+      ut_ad(bpage.state() == BUF_BLOCK_LRU);
+      ut_ad(bpage.frame);
       if (bpage.oldest_modification() > 1)
         bpage.clear_oldest_modification(false);
       slot->type= static_cast<mtr_memo_type_t>(slot->type & ~MTR_MEMO_MODIFY);

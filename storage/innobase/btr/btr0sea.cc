@@ -939,7 +939,7 @@ inline void buf_pool_t::clear_hash_index()
       here, because in that case we would have !block->index.
 
       In the end, the entire adaptive hash index will be removed. */
-      ut_ad(state == BUF_BLOCK_FILE_PAGE || state == BUF_BLOCK_REMOVE_HASH);
+      ut_ad(state == BUF_BLOCK_LRU || state == BUF_BLOCK_REMOVE_HASH);
 # if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
       block->n_pointers= 0;
 # endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
@@ -979,10 +979,10 @@ inline buf_block_t* buf_pool_t::block_from_ahi(const byte *ptr) const
   block[n].frame == block->page.frame + n * srv_page_size.  Check it. */
   ut_ad(block->page.frame == page_align(ptr));
   /* Read the state of the block without holding hash_lock.
-  A state transition from BUF_BLOCK_FILE_PAGE to
+  A state transition from BUF_BLOCK_LRU to
   BUF_BLOCK_REMOVE_HASH is possible during this execution. */
   ut_d(const buf_page_state state = block->page.state());
-  ut_ad(state == BUF_BLOCK_FILE_PAGE || state == BUF_BLOCK_REMOVE_HASH);
+  ut_ad(state == BUF_BLOCK_LRU || state == BUF_BLOCK_REMOVE_HASH);
   return block;
 }
 
@@ -1101,7 +1101,7 @@ fail:
 				from the LRU list of the buffer pool: do not
 				try to access this page. */
 				goto fail;
-			case BUF_BLOCK_FILE_PAGE:
+			case BUF_BLOCK_LRU:
 				break;
 			default:
 #ifndef NO_ELISION
@@ -1150,8 +1150,7 @@ got_no_latch:
 		goto fail_and_release_page;
 	}
 
-	if (block->page.state() != BUF_BLOCK_FILE_PAGE) {
-
+	if (block->page.state() != BUF_BLOCK_LRU) {
 		ut_ad(block->page.state() == BUF_BLOCK_REMOVE_HASH);
 
 fail_and_release_page:
@@ -2207,9 +2206,7 @@ btr_search_hash_table_validate(ulint hash_table_id)
 				= buf_pool.block_from_ahi((byte*) node->data);
 			index_id_t		page_index_id;
 
-			if (UNIV_LIKELY(block->page.state()
-					== BUF_BLOCK_FILE_PAGE)) {
-
+			if (UNIV_LIKELY(block->page.state() == BUF_BLOCK_LRU)) {
 				/* The space and offset are only valid
 				for file blocks.  It is possible that
 				the block is being freed

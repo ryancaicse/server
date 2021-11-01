@@ -108,7 +108,7 @@ uint	buf_LRU_old_threshold_ms;
 
 /** Remove bpage from buf_pool.LRU and buf_pool.page_hash.
 
-If bpage->state() == BUF_BLOCK_ZIP_PAGE && bpage->oldest_modification() <= 1,
+If !bpage->frame && bpage->oldest_modification() <= 1,
 the object will be freed.
 
 @param bpage      buffer block
@@ -117,9 +117,9 @@ the object will be freed.
 @param zip        whether bpage->zip of BUF_BLOCK_FILE_PAGE should be freed
 
 If a compressed page is freed other compressed pages may be relocated.
-@retval true if BUF_BLOCK_FILE_PAGE was removed from page_hash. The
+@retval true if bpage with bpage->frame was removed from page_hash. The
 caller needs to free the page to the free list
-@retval false if BUF_BLOCK_ZIP_PAGE was removed from page_hash. In
+@retval false if block without bpage->frame was removed from page_hash. In
 this case the block is already returned to the buddy allocator. */
 static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
                                         buf_pool_t::hash_chain &chain,
@@ -203,7 +203,7 @@ static bool buf_LRU_free_from_unzip_LRU_list(ulint limit)
 	     block && scanned < limit; ++scanned) {
 		buf_block_t* prev_block = UT_LIST_GET_PREV(unzip_LRU, block);
 
-		ut_ad(block->page.state() == BUF_BLOCK_FILE_PAGE);
+		ut_ad(block->page.in_file());
 		ut_ad(block->page.belongs_to_unzip_LRU());
 		ut_ad(block->in_unzip_LRU_list);
 		ut_ad(block->page.in_LRU_list);
@@ -851,7 +851,7 @@ func_exit:
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		new (b) buf_page_t(*bpage);
 		b->frame = nullptr;
-		b->set_state(BUF_BLOCK_ZIP_PAGE);
+		b->set_state(BUF_BLOCK_LRU);
 	}
 
 	mysql_mutex_assert_owner(&buf_pool.mutex);
@@ -1065,8 +1065,7 @@ ATTRIBUTE_COLD void buf_pool_t::free_block(buf_block_t *block)
 
 /** Remove bpage from buf_pool.LRU and buf_pool.page_hash.
 
-If bpage->state() == BUF_BLOCK_ZIP_PAGE && !bpage->oldest_modification(),
-the object will be freed.
+If !bpage->frame && !bpage->oldest_modification(), the object will be freed.
 
 @param bpage      buffer block
 @param id         page identifier
@@ -1074,9 +1073,9 @@ the object will be freed.
 @param zip        whether bpage->zip of BUF_BLOCK_FILE_PAGE should be freed
 
 If a compressed page is freed other compressed pages may be relocated.
-@retval true if BUF_BLOCK_FILE_PAGE was removed from page_hash. The
+@retval true if bpage with bpage->frame was removed from page_hash. The
 caller needs to free the page to the free list
-@retval false if BUF_BLOCK_ZIP_PAGE was removed from page_hash. In
+@retval false if block without bpage->frame was removed from page_hash. In
 this case the block is already returned to the buddy allocator. */
 static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
                                         buf_pool_t::hash_chain &chain,
@@ -1095,10 +1094,9 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
 
 	if (UNIV_LIKELY(bpage->frame != nullptr)) {
 		MEM_CHECK_ADDRESSABLE(bpage, sizeof(buf_block_t));
-		MEM_CHECK_ADDRESSABLE(((buf_block_t*) bpage)->frame,
-				      srv_page_size);
+		MEM_CHECK_ADDRESSABLE(bpage->frame, srv_page_size);
 		buf_block_modify_clock_inc((buf_block_t*) bpage);
-		if (bpage->zip.data) {
+		if (UNIV_LIKELY_NULL(bpage->zip.data)) {
 			const page_t*	page = bpage->frame;
 
 			ut_a(!zip || !bpage->oldest_modification());
@@ -1451,26 +1449,16 @@ void buf_LRU_print()
 			fputs("modif. ", stderr);
 		}
 
-		switch (const auto state = bpage->state()) {
-			const byte*	frame;
-		case BUF_BLOCK_FILE_PAGE:
-			frame = buf_block_get_frame((buf_block_t*) bpage);
-			fprintf(stderr, "\ntype %u index id " IB_ID_FMT "\n",
-				fil_page_get_type(frame),
-				btr_page_get_index_id(frame));
-			break;
-		case BUF_BLOCK_ZIP_PAGE:
-			frame = bpage->zip.data;
+		if (const byte* frame = bpage->zip.data) {
 			fprintf(stderr, "\ntype %u size " ULINTPF
 				" index id " IB_ID_FMT "\n",
 				fil_page_get_type(frame),
 				bpage->zip_size(),
 				btr_page_get_index_id(frame));
-			break;
-
-		default:
-			fprintf(stderr, "\n!state %d!\n", state);
-			break;
+		} else {
+			fprintf(stderr, "\ntype %u index id " IB_ID_FMT "\n",
+				fil_page_get_type(bpage->frame),
+				btr_page_get_index_id(bpage->frame));
 		}
 	}
 

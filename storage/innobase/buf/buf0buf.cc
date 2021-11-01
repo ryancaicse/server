@@ -1089,18 +1089,11 @@ inline const buf_block_t *buf_pool_t::chunk_t::not_freed() const
   buf_block_t *block= blocks;
   for (auto i= size; i--; block++)
   {
-    switch (block->page.state()) {
-    case BUF_BLOCK_ZIP_PAGE:
+    if (block->page.in_file())
+    {
       /* The uncompressed buffer pool should never
       contain ROW_FORMAT=COMPRESSED block descriptors. */
-      ut_error;
-      break;
-    case BUF_BLOCK_NOT_USED:
-    case BUF_BLOCK_MEMORY:
-    case BUF_BLOCK_REMOVE_HASH:
-      /* Skip blocks that are not being used for file pages. */
-      break;
-    case BUF_BLOCK_FILE_PAGE:
+      ut_ad(block->page.frame);
       const lsn_t lsn= block->page.oldest_modification();
 
       if (srv_read_only_mode)
@@ -1327,7 +1320,8 @@ inline bool buf_pool_t::realloc(buf_block_t *block)
 	buf_block_t*	new_block;
 
 	mysql_mutex_assert_owner(&mutex);
-	ut_ad(block->page.state() == BUF_BLOCK_FILE_PAGE);
+	ut_ad(block->page.in_file());
+	ut_ad(block->page.frame);
 
 	new_block = buf_LRU_get_free_only();
 
@@ -2044,13 +2038,13 @@ void buf_resize_shutdown()
 /** Relocate a ROW_FORMAT=COMPRESSED block in the LRU list and
 buf_pool.page_hash.
 The caller must relocate bpage->list.
-@param bpage   BUF_BLOCK_ZIP_PAGE block
+@param bpage   compressed-only control block
 @param dpage   destination control block */
 static void buf_relocate(buf_page_t *bpage, buf_page_t *dpage)
 {
   const page_id_t id= bpage->id();
   buf_pool_t::hash_chain &chain= buf_pool.page_hash.cell_get(id.fold());
-  ut_ad(bpage->state() == BUF_BLOCK_ZIP_PAGE);
+  ut_ad(bpage->in_file());
   ut_ad(!bpage->frame);
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(buf_pool.page_hash.lock_get(chain).is_write_locked());
@@ -2133,7 +2127,7 @@ retry:
     ut_ad(!w->oldest_modification());
     ut_ad(!w->zip.data);
     ut_ad(!w->in_zip_hash);
-    if (w->state() == BUF_BLOCK_ZIP_PAGE)
+    if (w->state() == BUF_BLOCK_LRU)
       /* This watch may be in use for some other page. */
       continue;
     ut_ad(w->state() == BUF_BLOCK_NOT_USED);
@@ -2141,7 +2135,7 @@ retry:
     /* w is pointing to watch[], which is protected by mutex.
     Normally, buf_page_t::id for objects that are reachable by
     page_hash.get(id, chain) are protected by hash_lock. */
-    w->set_state(BUF_BLOCK_ZIP_PAGE);
+    w->set_state(BUF_BLOCK_LRU);
     w->id_= id;
 
     buf_page_t *bpage= page_hash.get(id, chain);
@@ -2206,7 +2200,9 @@ void buf_pool_t::watch_unset(const page_id_t id, buf_pool_t::hash_chain &chain)
       // Now that w is detached from page_hash, release it to watch[].
       ut_ad(w->id_ == id);
       ut_ad(!w->buf_fix_count());
-      ut_ad(w->state() == BUF_BLOCK_ZIP_PAGE);
+      ut_ad(w->state() == BUF_BLOCK_LRU);
+      ut_ad(!w->frame);
+      ut_ad(!w->zip.data);
       w->set_state(BUF_BLOCK_NOT_USED);
     }
   }
@@ -2240,7 +2236,7 @@ void buf_page_free(fil_space_t *space, uint32_t page, mtr_t *mtr)
       {buf_pool.page_hash.lock_get(chain)};
     block= reinterpret_cast<buf_block_t*>
       (buf_pool.page_hash.get(page_id, chain));
-    if (!block || block->page.state() != BUF_BLOCK_FILE_PAGE)
+    if (!block || !block->page.frame)
       /* FIXME: convert ROW_FORMAT=COMPRESSED, without buf_zip_decompress() */
       return;
     block->fix();
@@ -2289,7 +2285,7 @@ lookup:
         /* There is no ROW_FORMAT=COMPRESSED page. */
         return nullptr;
 
-      if (discard_attempted || bpage->state() == BUF_BLOCK_ZIP_PAGE)
+      if (discard_attempted || !bpage->frame)
       {
         bpage->fix();
         break;
@@ -2551,7 +2547,7 @@ loop:
 		transactional_shared_lock_guard<page_hash_latch> g{hash_lock};
 		if (buf_pool.is_uncompressed(block)
 		    && page_id == block->page.id()
-		    && block->page.state() == BUF_BLOCK_FILE_PAGE) {
+		    && block->page.state() == BUF_BLOCK_LRU) {
 			ut_ad(!block->page.in_zip_hash);
 			block->fix();
 			goto got_block;
@@ -2692,8 +2688,9 @@ got_block:
 		}
 	}
 
-	switch (UNIV_EXPECT(block->page.state(), BUF_BLOCK_FILE_PAGE)) {
-	case BUF_BLOCK_FILE_PAGE:
+	ut_ad(block->page.in_file());
+
+	if (UNIV_LIKELY(block->page.frame != nullptr)) {
 		if (fsp_is_system_temporary(page_id.space())
 		    && block->page.io_fix() != BUF_IO_NONE) {
 			/* This suggests that the page is being flushed.
@@ -2718,13 +2715,7 @@ evict_from_pool:
 			mysql_mutex_unlock(&buf_pool.mutex);
 			return(NULL);
 		}
-
-		break;
-	default:
-		ut_error;
-		break;
-
-	case BUF_BLOCK_ZIP_PAGE:
+	} else {
 		if (UNIV_UNLIKELY(mode == BUF_EVICT_IF_IN_POOL)) {
 			goto evict_from_pool;
 		}
@@ -2812,7 +2803,7 @@ evict_from_pool:
 		/* Buffer-fix, I/O-fix, and X-latch the block
 		for the duration of the decompression.
 		Also add the block to the unzip_LRU list. */
-		block->page.set_state(BUF_BLOCK_FILE_PAGE);
+		block->page.set_state(BUF_BLOCK_LRU);
 
 		/* Insert at the front of unzip_LRU list */
 		buf_unzip_LRU_add_block(block, FALSE);
@@ -2857,7 +2848,8 @@ evict_from_pool:
 
 	ut_ad(block->page.buf_fix_count());
 
-	ut_ad(block->page.state() == BUF_BLOCK_FILE_PAGE);
+	ut_ad(block->page.in_file());
+	ut_ad(block->page.frame);
 
 #if defined UNIV_DEBUG || defined UNIV_IBUF_DEBUG
 re_evict:
@@ -2931,7 +2923,8 @@ re_evict:
 #ifdef UNIV_DEBUG
 	if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG */
-	ut_ad(block->page.state() == BUF_BLOCK_FILE_PAGE);
+	ut_ad(block->page.in_file());
+	ut_ad(block->page.frame);
 
 	/* We have to wait here because the IO_READ state was set
 	under the protection of the hash_lock and not block->lock. */
@@ -3056,7 +3049,8 @@ buf_page_optimistic_get(
 	ut_ad(rw_latch == RW_S_LATCH || rw_latch == RW_X_LATCH);
 
 	if (have_transactional_memory) {
-	} else if (UNIV_UNLIKELY(block->page.state() != BUF_BLOCK_FILE_PAGE
+	} else if (UNIV_UNLIKELY(!block->page.frame
+				 || !block->page.in_file()
 				 || block->page.io_fix() != BUF_IO_NONE)) {
 		return FALSE;
 	}
@@ -3068,7 +3062,8 @@ buf_page_optimistic_get(
 		transactional_shared_lock_guard<page_hash_latch> g{
 			buf_pool.page_hash.lock_get(chain)};
 		if (UNIV_UNLIKELY(id != block->page.id()
-				  || block->page.state() != BUF_BLOCK_FILE_PAGE
+				  || !block->page.frame
+				  || !block->page.in_file()
 				  || block->page.io_fix() != BUF_IO_NONE)) {
 			return FALSE;
 		}
@@ -3122,7 +3117,8 @@ func_exit:
 	if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG */
 	ut_ad(block->page.buf_fix_count());
-	ut_ad(block->page.state() == BUF_BLOCK_FILE_PAGE);
+	ut_ad(block->page.in_file());
+	ut_ad(block->page.frame);
 
 	++buf_pool.stat.n_page_gets;
 
@@ -3148,7 +3144,7 @@ buf_block_t *buf_page_try_get(const page_id_t page_id, mtr_t *mtr)
       {buf_pool.page_hash.lock_get(chain)};
     block= reinterpret_cast<buf_block_t*>
       (buf_pool.page_hash.get(page_id, chain));
-    if (!block || block->page.state() != BUF_BLOCK_FILE_PAGE)
+    if (!block || !block->page.frame)
       return nullptr;
     block->fix();
   }
@@ -3165,7 +3161,7 @@ buf_block_t *buf_page_try_get(const page_id_t page_id, mtr_t *mtr)
   if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG */
   ut_ad(block->page.buf_fix_count());
-  ut_ad(block->page.state() == BUF_BLOCK_FILE_PAGE);
+  ut_ad(block->page.in_file());
   ut_ad(block->page.id() == page_id);
 
   ++buf_pool.stat.n_page_gets;
@@ -3179,7 +3175,7 @@ buf_block_t *buf_page_try_get(const page_id_t page_id, mtr_t *mtr)
 void buf_block_t::initialise(const page_id_t page_id, ulint zip_size,
                              uint32_t fix)
 {
-  ut_ad(page.state() != BUF_BLOCK_FILE_PAGE);
+  ut_ad(!page.in_file());
   buf_block_init_low(this);
   page.init(page_id, fix);
   page_zip_set_size(&page.zip, zip_size);
@@ -3207,11 +3203,8 @@ loop:
 #ifdef BTR_CUR_HASH_ADAPT
     const dict_index_t *drop_hash_entry= nullptr;
 #endif
-    switch (UNIV_EXPECT(block->page.state(), BUF_BLOCK_FILE_PAGE)) {
-    default:
-      ut_ad(0);
-      break;
-    case BUF_BLOCK_FILE_PAGE:
+    if (UNIV_LIKELY(block->page.frame != nullptr))
+    {
       if (!mtr->have_x_latch(*block))
       {
         buf_block_buf_fix_inc(block);
@@ -3236,8 +3229,9 @@ loop:
 #ifdef BTR_CUR_HASH_ADAPT
       drop_hash_entry= block->index;
 #endif
-      break;
-    case BUF_BLOCK_ZIP_PAGE:
+    }
+    else
+    {
       page_hash_latch &hash_lock= buf_pool.page_hash.lock_get(chain);
       /* It does not make sense to use transactional_lock_guard here,
       because buf_relocate() would likely make the memory transaction
@@ -3260,14 +3254,13 @@ loop:
       buf_flush_relocate_on_flush_list(&block->page, &free_block->page);
       mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
-      free_block->page.set_state(BUF_BLOCK_FILE_PAGE);
+      free_block->page.set_state(BUF_BLOCK_LRU);
       buf_unzip_LRU_add_block(free_block, FALSE);
       hash_lock.unlock();
       ut_free(reinterpret_cast<buf_page_t*>(block));
       block= free_block;
       buf_block_buf_fix_inc(block);
       mtr_memo_push(mtr, block, MTR_MEMO_PAGE_X_FIX);
-      break;
     }
 
     mysql_mutex_unlock(&buf_pool.mutex);
@@ -3301,7 +3294,7 @@ loop:
   {
     transactional_lock_guard<page_hash_latch> g
       {buf_pool.page_hash.lock_get(chain)};
-    block->page.set_state(BUF_BLOCK_FILE_PAGE);
+    block->page.set_state(BUF_BLOCK_LRU);
     buf_pool.page_hash.append(chain, &block->page);
     block->lock.x_lock();
     if (UNIV_UNLIKELY(zip_size))
@@ -3633,7 +3626,6 @@ dberr_t buf_page_read_complete(buf_page_t *bpage, const fil_node_t &node)
 
   ut_ad(bpage->io_fix() == BUF_IO_READ);
   ut_ad(!!bpage->zip.ssize == !!bpage->zip.data);
-  ut_ad(bpage->state() == BUF_BLOCK_FILE_PAGE || bpage->zip.data);
 
   const byte *frame= bpage->zip.data ? bpage->zip.data : bpage->frame;
   ut_ad(frame);
@@ -3645,7 +3637,7 @@ dberr_t buf_page_read_complete(buf_page_t *bpage, const fil_node_t &node)
     goto database_corrupted;
   }
 
-  if (bpage->zip.data && bpage->state() == BUF_BLOCK_FILE_PAGE)
+  if (bpage->belongs_to_unzip_LRU())
   {
     buf_pool.n_pend_unzip++;
     auto ok= buf_zip_decompress(reinterpret_cast<buf_block_t*>(bpage), FALSE);
@@ -3700,7 +3692,7 @@ database_corrupted:
                     err= DB_SUCCESS;
                     goto page_not_corrupt;);
 
-    if (bpage->zip.data && bpage->state() == BUF_BLOCK_FILE_PAGE)
+    if (bpage->belongs_to_unzip_LRU())
       memset_aligned<UNIV_PAGE_SIZE_MIN>(bpage->frame, 0, srv_page_size);
 
     if (err == DB_PAGE_CORRUPTED)
@@ -3743,7 +3735,7 @@ release_page:
   if (recv_recovery_is_on())
     recv_recover_page(node.space, bpage);
 
-  if (bpage->state() == BUF_BLOCK_FILE_PAGE && !recv_no_ibuf_operations &&
+  if (bpage->frame && !recv_no_ibuf_operations &&
       (!id.space() || !is_predefined_tablespace(id.space())) &&
       fil_page_get_type(frame) == FIL_PAGE_INDEX &&
       page_is_leaf(frame))
@@ -3754,14 +3746,8 @@ release_page:
   DBUG_PRINT("ib_buf", ("read page %u:%u",
                         id.space(), id.page_no()));
 
-  /* Because this thread which does the unlocking might not be the same that
-  did the locking, we use a pass value != 0 in unlock, which simply
-  removes the newest lock debug record, without checking the thread id. */
-  if (bpage->state() == BUF_BLOCK_FILE_PAGE)
-  {
-    buf_block_t *block= reinterpret_cast<buf_block_t*>(bpage);
-    block->lock.x_unlock(true);
-  }
+  if (UNIV_LIKELY(bpage->frame != nullptr))
+    reinterpret_cast<buf_block_t*>(bpage)->lock.x_unlock(true);
   bpage->io_unfix();
 
   ut_d(auto n=) buf_pool.n_pend_reads--;
@@ -3846,12 +3832,6 @@ void buf_pool_t::validate()
 
 		for (j = chunk->size; j--; block++) {
 			switch (block->page.state()) {
-			case BUF_BLOCK_ZIP_PAGE:
-				/* This kind of block descriptors should
-				be allocated by malloc() only. */
-				ut_error;
-				break;
-
 			case BUF_BLOCK_NOT_USED:
 				n_free++;
 				break;
@@ -3861,14 +3841,14 @@ void buf_pool_t::validate()
 				/* do nothing */
 				break;
 
-			case BUF_BLOCK_FILE_PAGE:
+			case BUF_BLOCK_LRU:
+				ut_ad(block->page.frame);
 				const page_id_t id = block->page.id();
 				ut_ad(page_hash.get(id, page_hash.cell_get(
 							    id.fold()))
 				      == &block->page);
 				n_lru++;
 				break;
-
 			}
 		}
 	}
@@ -3878,25 +3858,16 @@ void buf_pool_t::validate()
 	mysql_mutex_lock(&flush_list_mutex);
 	for (buf_page_t* b = UT_LIST_GET_FIRST(flush_list); b;
 	     b = UT_LIST_GET_NEXT(list, b)) {
+		ut_ad(b->in_file());
 		ut_ad(b->oldest_modification());
 		ut_ad(!fsp_is_system_temporary(b->id().space()));
 		n_flushing++;
 
-		switch (b->state()) {
-		case BUF_BLOCK_ZIP_PAGE:
+		if (UNIV_UNLIKELY(!b->frame)) {
 			n_lru++;
 			n_zip++;
-			break;
-		case BUF_BLOCK_FILE_PAGE:
-			/* uncompressed page */
-			break;
-		case BUF_BLOCK_NOT_USED:
-		case BUF_BLOCK_MEMORY:
-		case BUF_BLOCK_REMOVE_HASH:
-			ut_error;
-			break;
 		}
-		const page_id_t id = b->id();
+		const page_id_t id{b->id()};
 		ut_ad(page_hash.get(id, page_hash.cell_get(id.fold())) == b);
 	}
 

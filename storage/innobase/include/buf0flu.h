@@ -124,7 +124,7 @@ already in it. */
 inline void buf_flush_note_modification(buf_block_t *b, lsn_t start, lsn_t end)
 {
   ut_ad(!srv_read_only_mode);
-  ut_ad(b->page.state() == BUF_BLOCK_FILE_PAGE);
+  ut_ad(b->page.state() == BUF_BLOCK_LRU);
   ut_ad(b->page.buf_fix_count());
   ut_ad(mach_read_from_8(b->page.frame + FIL_PAGE_LSN) <= end);
   mach_write_to_8(b->page.frame + FIL_PAGE_LSN, end);

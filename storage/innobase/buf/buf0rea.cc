@@ -150,7 +150,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
       }
 
       block->page.set_io_fix(BUF_IO_READ);
-      block->page.set_state(BUF_BLOCK_FILE_PAGE);
+      block->page.set_state(BUF_BLOCK_LRU);
       buf_pool.page_hash.append(chain, &block->page);
     }
 
@@ -204,7 +204,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     page_zip_set_size(&bpage->zip, zip_size);
     bpage->zip.data = (page_zip_t*) data;
 
-    bpage->init(BUF_BLOCK_ZIP_PAGE, page_id);
+    bpage->init(BUF_BLOCK_LRU, page_id);
 
     {
       transactional_lock_guard<page_hash_latch> g

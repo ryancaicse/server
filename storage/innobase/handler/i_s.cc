@@ -130,7 +130,8 @@ struct buf_page_info_t{
 					buf_pool.freed_page_clock */
 	unsigned	zip_ssize:PAGE_ZIP_SSIZE_BITS;
 					/*!< Compressed page size */
-	unsigned	page_state:3; /*!< Page state */
+	unsigned	page_state:2; /*!< Page state */
+	unsigned	compressed_only:1; /*!< ROW_FORMAT=COMPRESSED only */
 	unsigned	page_type:I_S_PAGE_TYPE_BITS;	/*!< Page type */
 	unsigned	num_recs:UNIV_PAGE_SIZE_SHIFT_MAX-2;
 					/*!< Number of records on Page */
@@ -4018,8 +4019,7 @@ i_s_innodb_buffer_page_fill(
 			   : 0, true));
 
 		OK(fields[IDX_BUFFER_PAGE_STATE]->store(
-			   1 + std::min<unsigned>(page_info->page_state,
-						  BUF_BLOCK_FILE_PAGE), true));
+			   1 + page_info->page_state, true));
 
 		OK(fields[IDX_BUFFER_PAGE_IO_FIX]->store(
 			   1 + page_info->io_fix, true));
@@ -4109,18 +4109,15 @@ i_s_innodb_buffer_page_get_info(
 	compile_time_assert(BUF_BLOCK_NOT_USED == 0);
 	compile_time_assert(BUF_BLOCK_MEMORY == 1);
 	compile_time_assert(BUF_BLOCK_REMOVE_HASH == 2);
-	compile_time_assert(BUF_BLOCK_FILE_PAGE == 3);
-	compile_time_assert(BUF_BLOCK_ZIP_PAGE == 4);
+	compile_time_assert(BUF_BLOCK_LRU == 3);
 
 	auto state = bpage->state();
-	page_info->page_state= int{state} & 7;
+	page_info->page_state= int{state} & 3;
+	page_info->compressed_only= state == BUF_BLOCK_LRU && !bpage->frame;
 
-	switch (state) {
-	default:
+	if (state != BUF_BLOCK_LRU) {
 		page_info->page_type = I_S_PAGE_TYPE_UNKNOWN;
-		break;
-	case BUF_BLOCK_FILE_PAGE:
-	case BUF_BLOCK_ZIP_PAGE:
+	} else {
 		const byte*	frame;
 
 		page_info->id = bpage->id();
@@ -4150,8 +4147,8 @@ i_s_innodb_buffer_page_get_info(
 			return;
 		}
 
-		if (state == BUF_BLOCK_FILE_PAGE) {
-			frame = bpage->frame;
+		frame = bpage->frame;
+		if (UNIV_LIKELY(frame != nullptr)) {
 #ifdef BTR_CUR_HASH_ADAPT
 			/* Note: this may be a false positive, that
 			is, block->index will not always be set to
@@ -4519,8 +4516,7 @@ i_s_innodb_buf_page_lru_fill(
 			   ? 512 << page_info->zip_ssize : 0, true));
 
 		OK(fields[IDX_BUF_LRU_PAGE_STATE]->store(
-			   page_info->page_state == BUF_BLOCK_ZIP_PAGE,
-			   true));
+			   page_info->compressed_only, true));
 
 		OK(fields[IDX_BUF_LRU_PAGE_IO_FIX]->store(
 			   1 + page_info->io_fix, true));

@@ -2816,7 +2816,8 @@ void recv_recover_page(fil_space_t* space, buf_page_t* bpage)
 	mtr.start();
 	mtr.set_log_mode(MTR_LOG_NO_REDO);
 
-	ut_ad(bpage->state() == BUF_BLOCK_FILE_PAGE);
+	ut_ad(bpage->state() == BUF_BLOCK_LRU);
+	ut_ad(bpage->frame);
 	buf_block_t* block = reinterpret_cast<buf_block_t*>(bpage);
 
 	/* Move the ownership of the x-latch on the page to

@@ -240,8 +240,7 @@ void buf_flush_remove_pages(ulint id)
     for (buf_page_t *bpage= UT_LIST_GET_LAST(buf_pool.flush_list); bpage; )
     {
       ut_d(const auto s= bpage->state());
-      ut_ad(s == BUF_BLOCK_ZIP_PAGE || s == BUF_BLOCK_FILE_PAGE ||
-            s == BUF_BLOCK_REMOVE_HASH);
+      ut_ad(s == BUF_BLOCK_LRU || s == BUF_BLOCK_REMOVE_HASH);
       buf_page_t *prev= UT_LIST_GET_PREV(list, bpage);
 
       const page_id_t bpage_id(bpage->id());
@@ -794,7 +793,7 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
 
   block_lock *rw_lock;
 
-  if (bpage->state() != BUF_BLOCK_FILE_PAGE)
+  if (UNIV_UNLIKELY(!bpage->frame))
     rw_lock= nullptr;
   else
   {
@@ -838,8 +837,7 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
   ut_ad(space == fil_system.temp_space
         ? oldest_modification == 2
         : oldest_modification > 2);
-  ut_ad(bpage->state() ==
-        (rw_lock ? BUF_BLOCK_FILE_PAGE : BUF_BLOCK_ZIP_PAGE));
+  ut_ad(bpage->state() == BUF_BLOCK_LRU);
   ut_ad(ULINT_UNDEFINED >
         (lru ? buf_pool.n_flush_LRU_ : buf_pool.n_flush_list_));
   mysql_mutex_unlock(&buf_pool.mutex);
@@ -1560,8 +1558,7 @@ bool buf_flush_list_space(fil_space_t *space, ulint *n_flushed)
   for (buf_page_t *bpage= UT_LIST_GET_LAST(buf_pool.flush_list); bpage; )
   {
     ut_d(const auto s= bpage->state());
-    ut_ad(s == BUF_BLOCK_ZIP_PAGE || s == BUF_BLOCK_FILE_PAGE ||
-          s == BUF_BLOCK_REMOVE_HASH);
+    ut_ad(s == BUF_BLOCK_LRU || s == BUF_BLOCK_REMOVE_HASH);
     ut_ad(bpage->oldest_modification());
     ut_ad(bpage->in_file());
 
@@ -2485,8 +2482,7 @@ static void buf_flush_validate_low()
 		in the flush list waiting to acquire the
 		buf_pool.flush_list_mutex to complete the relocation. */
 		ut_d(const auto s= bpage->state());
-		ut_ad(s == BUF_BLOCK_ZIP_PAGE || s == BUF_BLOCK_FILE_PAGE
-		      || s == BUF_BLOCK_REMOVE_HASH);
+		ut_ad(s == BUF_BLOCK_LRU || s == BUF_BLOCK_REMOVE_HASH);
 		ut_ad(om == 1 || om > 2);
 
 		bpage = UT_LIST_GET_NEXT(list, bpage);
