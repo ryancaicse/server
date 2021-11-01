@@ -1387,7 +1387,7 @@ rtr_leaf_push_match_rec(
 	ulint		data_len;
 	rtr_rec_t	rtr_rec;
 
-	buf = match_rec->block.frame + match_rec->used;
+	buf = match_rec->block.page.frame + match_rec->used;
 	ut_ad(page_rec_is_leaf(rec));
 
 	copy = rec_copy(buf, rec, offsets);
@@ -1499,7 +1499,7 @@ rtr_copy_buf(
 	it generates (valid) compiler warnings that the vtable pointer
 	will be copied. */
 	new (&matches->block.page) buf_page_t(block->page);
-	matches->block.frame = block->frame;
+	matches->block.page.frame = block->page.frame;
 	matches->block.unzip_LRU = block->unzip_LRU;
 
 	ut_d(matches->block.in_unzip_LRU_list = block->in_unzip_LRU_list);
@@ -1534,13 +1534,12 @@ rtr_init_match(
 	ut_ad(matches->matched_recs->empty());
 	matches->locked = false;
 	rtr_copy_buf(matches, block);
-	matches->block.frame = matches->bufp;
+	matches->block.page.frame = matches->bufp;
 	matches->valid = false;
-	/* We have to copy PAGE_W*_SUPREMUM_END bytes so that we can
+	/* We have to copy PAGE_*_SUPREMUM_END bytes so that we can
 	use infimum/supremum of this page as normal btr page for search. */
-	memcpy(matches->block.frame, page, page_is_comp(page)
-						? PAGE_NEW_SUPREMUM_END
-						: PAGE_OLD_SUPREMUM_END);
+	memcpy(matches->block.page.frame, page, page_is_comp(page)
+	       ? PAGE_NEW_SUPREMUM_END : PAGE_OLD_SUPREMUM_END);
 	matches->used = page_is_comp(page)
 				? PAGE_NEW_SUPREMUM_END
 				: PAGE_OLD_SUPREMUM_END;

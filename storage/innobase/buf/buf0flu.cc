@@ -376,7 +376,7 @@ void buf_page_write_complete(const IORequest &request)
   ut_ad(bpage->io_fix() == BUF_IO_WRITE);
   bpage->set_io_fix(BUF_IO_NONE);
 
-  if (bpage->state() == BUF_BLOCK_FILE_PAGE)
+  if (UNIV_LIKELY(bpage->frame != nullptr))
     reinterpret_cast<buf_block_t*>(bpage)->lock.u_unlock(true);
 
   if (request.is_LRU())
@@ -440,16 +440,14 @@ buf_flush_init_for_writing(
 	void*			page_zip_,
 	bool			use_full_checksum)
 {
-	if (block != NULL && block->frame != page) {
+	if (block && block->page.frame != page) {
 		/* If page is encrypted in full crc32 format then
 		checksum stored already as a part of fil_encrypt_buf() */
 		ut_ad(use_full_checksum);
 		return;
 	}
 
-	ut_ad(block == NULL || block->frame == page);
-	ut_ad(block == NULL || page_zip_ == NULL
-	      || &block->page.zip == page_zip_);
+	ut_ad(!block || block->page.frame == page);
 	ut_ad(page);
 
 	if (page_zip_) {
@@ -457,6 +455,7 @@ buf_flush_init_for_writing(
 		ulint		size;
 
 		page_zip = static_cast<page_zip_des_t*>(page_zip_);
+		ut_ad(!block || &block->page.zip == page_zip);
 		size = page_zip_get_size(page_zip);
 
 		ut_ad(size);
@@ -753,7 +752,6 @@ not_compressed:
 inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
 {
   ut_ad(bpage->in_file());
-  const bool uncompressed= bpage->state() == BUF_BLOCK_FILE_PAGE;
   mysql_mutex_lock(&mutex);
   bpage->set_io_fix(BUF_IO_NONE);
   bpage->status= buf_page_t::NORMAL;
@@ -761,7 +759,7 @@ inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
   ut_d(const lsn_t oldest_modification= bpage->oldest_modification();)
   if (fsp_is_system_temporary(bpage->id().space()))
   {
-    ut_ad(uncompressed);
+    ut_ad(bpage->frame);
     ut_ad(oldest_modification == 2);
   }
   else
@@ -772,7 +770,7 @@ inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
   bpage->clear_oldest_modification();
   mysql_mutex_unlock(&flush_list_mutex);
 
-  if (uncompressed)
+  if (UNIV_LIKELY(bpage->frame != nullptr))
     reinterpret_cast<buf_block_t*>(bpage)->lock.u_unlock(true);
 
   buf_LRU_free_page(bpage, true);
@@ -875,7 +873,7 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
     }
     else
     {
-      byte *page= block->frame;
+      byte *page= block->page.frame;
       size= block->physical_size();
 #if defined HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE || defined _WIN32
       orig_size= size;
@@ -918,9 +916,10 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
     {
       if (UNIV_LIKELY(space->purpose == FIL_TYPE_TABLESPACE))
       {
-        const lsn_t lsn= mach_read_from_8(my_assume_aligned<8>
-                                          (FIL_PAGE_LSN + (frame ? frame
-                                                           : block->frame)));
+        const lsn_t lsn=
+          mach_read_from_8(my_assume_aligned<8>(FIL_PAGE_LSN +
+                                                (frame ? frame
+                                                 : block->page.frame)));
         ut_ad(lsn >= oldest_modification);
         if (lsn > log_sys.get_flushed_lsn())
           log_write_up_to(lsn, true);
@@ -1222,7 +1221,7 @@ static void buf_flush_discard_page(buf_page_t *bpage)
 
   block_lock *rw_lock;
 
-  if (bpage->state() != BUF_BLOCK_FILE_PAGE)
+  if (UNIV_UNLIKELY(!bpage->frame))
     rw_lock= nullptr;
   else
   {

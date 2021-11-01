@@ -198,7 +198,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
       }
     }
 
-    bpage= buf_page_alloc_descriptor();
+    bpage= static_cast<buf_page_t*>(ut_zalloc_nokey(sizeof *bpage));
 
     page_zip_des_init(&bpage->zip);
     page_zip_set_size(&bpage->zip, zip_size);
@@ -315,16 +315,7 @@ nothing_read:
 		 "read page " << page_id << " zip_size=" << zip_size
 		 << " unzip=" << unzip << ',' << (sync ? "sync" : "async"));
 
-	void*	dst;
-
-	if (zip_size) {
-		dst = bpage->zip.data;
-	} else {
-		ut_a(bpage->state() == BUF_BLOCK_FILE_PAGE);
-
-		dst = ((buf_block_t*) bpage)->frame;
-	}
-
+	void* dst = zip_size ? bpage->zip.data : bpage->frame;
 	const ulint len = zip_size ? zip_size : srv_page_size;
 
 	auto fio = space->io(IORequest(sync
@@ -628,19 +619,7 @@ failed:
       on the page, we do not acquire an s-latch on the page, this is to
       prevent deadlocks. The hash_lock is only protecting the
       buf_pool.page_hash for page i, not the bpage contents itself. */
-      const byte *f;
-      switch (UNIV_EXPECT(bpage->state(), BUF_BLOCK_FILE_PAGE)) {
-      case BUF_BLOCK_FILE_PAGE:
-        f= reinterpret_cast<const buf_block_t*>(bpage)->frame;
-        break;
-      case BUF_BLOCK_ZIP_PAGE:
-        f= bpage->zip.data;
-        break;
-      default:
-        ut_ad("invalid state" == 0);
-        goto fail;
-      }
-
+      const byte *f= bpage->frame ? bpage->frame : bpage->zip.data;
       uint32_t prev= mach_read_from_4(my_assume_aligned<4>(f + FIL_PAGE_PREV));
       uint32_t next= mach_read_from_4(my_assume_aligned<4>(f + FIL_PAGE_NEXT));
       if (prev == FIL_NULL || next == FIL_NULL)

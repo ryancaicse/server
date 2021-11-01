@@ -170,9 +170,6 @@ operator<<(
 
 #ifndef UNIV_INNOCHECKSUM
 # define buf_pool_get_curr_size() srv_buf_pool_curr_size
-# define buf_page_alloc_descriptor()					\
-	static_cast<buf_page_t*>(ut_zalloc_nokey(sizeof(buf_page_t)))
-# define buf_page_free_descriptor(bpage) ut_free(bpage)
 
 /** Allocate a buffer block.
 @return own: the allocated block, in state BUF_BLOCK_MEMORY */
@@ -222,15 +219,15 @@ buf_block_t *buf_page_try_get(const page_id_t page_id, mtr_t *mtr);
 
 /** Get read access to a compressed page (usually of type
 FIL_PAGE_TYPE_ZBLOB or FIL_PAGE_TYPE_ZBLOB2).
-The page must be released with buf_page_release_zip().
+The page must be released with unfix().
 NOTE: the page is not protected by any latch.  Mutual exclusion has to
 be implemented at a higher level.  In other words, all possible
 accesses to a given page through this function must be protected by
 the same set of mutexes or latches.
-@param[in]	page_id		page id
-@param[in]	zip_size	ROW_FORMAT=COMPRESSED page size
+@param page_id   page identifier
+@param zip_size  ROW_FORMAT=COMPRESSED page size in bytes
 @return pointer to the block */
-buf_page_t* buf_page_get_zip(const page_id_t page_id, ulint zip_size);
+buf_page_t *buf_page_get_zip(const page_id_t page_id, ulint zip_size);
 
 /** Get access to a database page. Buffered redo log may be applied.
 @param[in]	page_id			page id
@@ -305,13 +302,6 @@ buf_block_t*
 buf_page_create_deferred(uint32_t space_id, ulint zip_size, mtr_t *mtr,
                          buf_block_t *free_block);
 
-/********************************************************************//**
-Releases a compressed-only page acquired with buf_page_get_zip(). */
-UNIV_INLINE
-void
-buf_page_release_zip(
-/*=================*/
-	buf_page_t*	bpage);		/*!< in: buffer block */
 /********************************************************************//**
 Releases a latch, if specified. */
 UNIV_INLINE
@@ -516,19 +506,7 @@ void buf_pool_invalidate();
 --------------------------- LOWER LEVEL ROUTINES -------------------------
 =========================================================================*/
 
-#ifdef UNIV_DEBUG
-/*********************************************************************//**
-Gets a pointer to the memory frame of a block.
-@return pointer to the frame */
-UNIV_INLINE
-buf_frame_t*
-buf_block_get_frame(
-/*================*/
-	const buf_block_t*	block)	/*!< in: pointer to the control block */
-	MY_ATTRIBUTE((warn_unused_result));
-#else /* UNIV_DEBUG */
-# define buf_block_get_frame(block) (block)->frame
-#endif /* UNIV_DEBUG */
+#define buf_block_get_frame(block) (block)->page.frame
 
 /*********************************************************************//**
 Gets the compressed page descriptor corresponding to an uncompressed page
@@ -654,19 +632,19 @@ private:
   buf_page_state state_;
 
 public:
+  /** pointer to aligned, uncompressed page frame of innodb_page_size */
+  byte *frame;
   /** buf_pool.page_hash link; protected by buf_pool.page_hash.lock_get() */
   buf_page_t *hash;
   /* @} */
-	page_zip_des_t	zip;		/*!< compressed page; zip.data
-					(but not the data it points to) is
-					also protected by buf_pool.mutex;
-					state == BUF_BLOCK_ZIP_PAGE and
-					zip.data == NULL means an active
-					buf_pool.watch */
+  /** ROW_FORMAT=COMPRESSED page; zip.data (but not the data it points to)
+  is also protected by buf_pool.mutex;
+  !frame && !zip.data means an active buf_pool.watch */
+  page_zip_des_t zip;
 
-	buf_tmp_buffer_t* slot;		/*!< Slot for temporary memory
-					used for encryption/compression
-					or NULL */
+  /** temporary memory used for ENCRYPTED or PAGE_COMPRESSED pages */
+  buf_tmp_buffer_t *slot;
+
 #ifdef UNIV_DEBUG
   /** whether this->list is in buf_pool.zip_hash; protected by buf_pool.mutex */
   bool in_zip_hash;
@@ -797,7 +775,7 @@ public:
   /** @return if this belongs to buf_pool.unzip_LRU */
   bool belongs_to_unzip_LRU() const
   {
-    return zip.data && state() != BUF_BLOCK_ZIP_PAGE;
+    return UNIV_LIKELY_NULL(zip.data) && state() != BUF_BLOCK_ZIP_PAGE;
   }
 
   inline void add_buf_fix_count(uint32_t count);
@@ -929,11 +907,7 @@ struct buf_block_t{
 					be the first field, so that
 					buf_pool.page_hash can point
 					to buf_page_t or buf_block_t */
-	byte*		frame;		/*!< pointer to buffer frame which
-					is of size srv_page_size, and
-					aligned to an address divisible by
-					srv_page_size */
-  /** read-write lock covering frame */
+  /** read-write lock covering page.frame */
   block_lock lock;
 #ifdef UNIV_DEBUG
   /** whether page.list is in buf_pool.withdraw
@@ -945,11 +919,8 @@ struct buf_block_t{
   protected by buf_pool.mutex */
   bool in_unzip_LRU_list;
 #endif
-	UT_LIST_NODE_T(buf_block_t) unzip_LRU;
-					/*!< node of the decompressed LRU list;
-					a block is in the unzip_LRU list
-					if page.state() == BUF_BLOCK_FILE_PAGE
-					and page.zip.data != NULL */
+  /** member of buf_pool.unzip_LRU (if belongs_to_unzip_LRU()) */
+  UT_LIST_NODE_T(buf_block_t) unzip_LRU;
 	/* @} */
 	/** @name Optimistic search field */
 	/* @{ */
@@ -998,7 +969,7 @@ struct buf_block_t{
 
 	Another exception for buf_pool_t::clear_hash_index() is that
 	assigning block->index = NULL (and block->n_pointers = 0)
-	is allowed whenever btr_search_own_all(RW_LOCK_X).
+	is allowed whenever all AHI latches are exclusively locked.
 
 	Another exception is that ha_insert_for_fold() may
 	decrement n_pointers without holding the appropriate latch
@@ -1022,9 +993,7 @@ struct buf_block_t{
 	Atomic_counter<ulint>
 			n_pointers;	/*!< used in debugging: the number of
 					pointers in the adaptive hash index
-					pointing to this frame;
-					protected by atomic memory access
-					or btr_search_own_all(). */
+					pointing to this frame */
 #  define assert_block_ahi_empty(block)					\
 	ut_a((block)->n_pointers == 0)
 #  define assert_block_ahi_empty_on_init(block) do {			\
@@ -1085,7 +1054,7 @@ struct buf_block_t{
 Compute the hash fold value for blocks in buf_pool.zip_hash. */
 /* @{ */
 #define BUF_POOL_ZIP_FOLD_PTR(ptr) (ulint(ptr) >> srv_page_size_shift)
-#define BUF_POOL_ZIP_FOLD(b) BUF_POOL_ZIP_FOLD_PTR((b)->frame)
+#define BUF_POOL_ZIP_FOLD(b) BUF_POOL_ZIP_FOLD_PTR((b)->page.frame)
 #define BUF_POOL_ZIP_FOLD_BPAGE(b) BUF_POOL_ZIP_FOLD((buf_block_t*) (b))
 /* @} */
 
@@ -1281,7 +1250,7 @@ class buf_pool_t
     size_t mem_size() const { return mem_pfx.m_size; }
 
     /** Register the chunk */
-    void reg() { map_reg->emplace(map::value_type(blocks->frame, this)); }
+    void reg() { map_reg->emplace(map::value_type(blocks->page.frame, this)); }
 
     /** Allocate a chunk of buffer frames.
     @param bytes    requested size
@@ -1386,8 +1355,8 @@ public:
     for (const chunk_t *chunk= chunks + n_chunks_new,
          * const echunk= chunks + n_chunks;
          chunk != echunk; chunk++)
-      if (ptr >= chunk->blocks->frame &&
-          ptr < (chunk->blocks + chunk->size - 1)->frame + srv_page_size)
+      if (ptr >= chunk->blocks->page.frame &&
+          ptr < (chunk->blocks + chunk->size - 1)->page.frame + srv_page_size)
         return true;
     return false;
   }
@@ -1996,6 +1965,7 @@ inline buf_page_t *buf_pool_t::page_hash_table::get(const page_id_t id,
   for (buf_page_t *bpage= chain.first; bpage; bpage= bpage->hash)
   {
     ut_ad(bpage->in_page_hash);
+    ut_ad(bpage->in_file());
     if (bpage->id() == id)
       return bpage;
   }
@@ -2044,6 +2014,7 @@ inline void buf_page_t::set_state(buf_page_state state)
   case BUF_BLOCK_NOT_USED:
     break;
   case BUF_BLOCK_ZIP_PAGE:
+    ut_ad(!frame);
     if (this >= &buf_pool.watch[0] &&
         this <= &buf_pool.watch[UT_ARR_SIZE(buf_pool.watch)])
       break;

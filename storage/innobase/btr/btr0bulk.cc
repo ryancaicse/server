@@ -494,8 +494,8 @@ inline void PageBulk::finishPage()
 
 inline bool PageBulk::needs_finish() const
 {
-  ut_ad(page_align(m_cur_rec) == m_block->frame);
-  ut_ad(m_page == m_block->frame);
+  ut_ad(page_align(m_cur_rec) == m_block->page.frame);
+  ut_ad(m_page == m_block->page.frame);
   if (!m_page[PAGE_HEADER + PAGE_DIRECTION_B])
     return true;
   ulint heap_no, n_heap= page_header_get_field(m_page, PAGE_N_HEAP);
@@ -1208,7 +1208,7 @@ BtrBulk::finish(dberr_t	err)
 		last_block = btr_block_get(*m_index, last_page_no, RW_X_LATCH,
 					   false, &mtr);
 		first_rec = page_rec_get_next(
-			page_get_infimum_rec(last_block->frame));
+			page_get_infimum_rec(last_block->page.frame));
 		ut_ad(page_rec_is_user_rec(first_rec));
 
 		/* Copy last page to root page. */

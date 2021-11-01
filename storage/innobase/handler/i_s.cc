@@ -4151,16 +4151,15 @@ i_s_innodb_buffer_page_get_info(
 		}
 
 		if (state == BUF_BLOCK_FILE_PAGE) {
-			const buf_block_t*block;
-
-			block = reinterpret_cast<const buf_block_t*>(bpage);
-			frame = block->frame;
+			frame = bpage->frame;
 #ifdef BTR_CUR_HASH_ADAPT
 			/* Note: this may be a false positive, that
 			is, block->index will not always be set to
 			NULL when the last adaptive hash index
 			reference is dropped. */
-			page_info->hashed = (block->index != NULL);
+			page_info->hashed =
+				reinterpret_cast<const buf_block_t*>(bpage)
+				->index != nullptr;
 #endif /* BTR_CUR_HASH_ADAPT */
 		} else {
 			ut_ad(page_info->zip_ssize);

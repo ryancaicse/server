@@ -204,6 +204,7 @@ static bool buf_LRU_free_from_unzip_LRU_list(ulint limit)
 		buf_block_t* prev_block = UT_LIST_GET_PREV(unzip_LRU, block);
 
 		ut_ad(block->page.state() == BUF_BLOCK_FILE_PAGE);
+		ut_ad(block->page.belongs_to_unzip_LRU());
 		ut_ad(block->in_unzip_LRU_list);
 		ut_ad(block->page.in_LRU_list);
 
@@ -839,17 +840,17 @@ bool buf_LRU_free_page(buf_page_t *bpage, bool zip)
 		if (oldest_modification) {
 			goto func_exit;
 		}
-	} else if (oldest_modification
-		   && bpage->state() != BUF_BLOCK_FILE_PAGE) {
+	} else if (oldest_modification && !bpage->frame) {
 func_exit:
 		hash_lock.unlock();
 		return(false);
 
-	} else if (bpage->state() == BUF_BLOCK_FILE_PAGE) {
-		b = buf_page_alloc_descriptor();
+	} else if (bpage->frame) {
+		b = static_cast<buf_page_t*>(ut_zalloc_nokey(sizeof *b));
 		ut_a(b);
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		new (b) buf_page_t(*bpage);
+		b->frame = nullptr;
 		b->set_state(BUF_BLOCK_ZIP_PAGE);
 	}
 
@@ -1016,10 +1017,10 @@ buf_LRU_block_free_non_file_page(
 	MEM_UNDEFINED(block->frame, srv_page_size);
 	/* Wipe page_no and space_id */
 	static_assert(FIL_PAGE_OFFSET % 4 == 0, "alignment");
-	memset_aligned<4>(block->frame + FIL_PAGE_OFFSET, 0xfe, 4);
+	memset_aligned<4>(block->page.frame + FIL_PAGE_OFFSET, 0xfe, 4);
 	static_assert(FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID % 4 == 2,
 		      "not perfect alignment");
-	memset_aligned<2>(block->frame + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID,
+	memset_aligned<2>(block->page.frame + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID,
 			  0xfe, 4);
 	data = block->page.zip.data;
 
@@ -1049,7 +1050,7 @@ buf_LRU_block_free_non_file_page(
 		pthread_cond_signal(&buf_pool.done_free);
 	}
 
-	MEM_NOACCESS(block->frame, srv_page_size);
+	MEM_NOACCESS(block->page.frame, srv_page_size);
 }
 
 /** Release a memory block to the buffer pool. */
@@ -1086,19 +1087,19 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
 
 	ut_a(bpage->io_fix() == BUF_IO_NONE);
 	ut_a(!bpage->buf_fix_count());
+	ut_ad(bpage->in_file());
 
 	buf_LRU_remove_block(bpage);
 
 	buf_pool.freed_page_clock += 1;
 
-	switch (bpage->state()) {
-	case BUF_BLOCK_FILE_PAGE:
+	if (UNIV_LIKELY(bpage->frame != nullptr)) {
 		MEM_CHECK_ADDRESSABLE(bpage, sizeof(buf_block_t));
 		MEM_CHECK_ADDRESSABLE(((buf_block_t*) bpage)->frame,
 				      srv_page_size);
 		buf_block_modify_clock_inc((buf_block_t*) bpage);
 		if (bpage->zip.data) {
-			const page_t*	page = ((buf_block_t*) bpage)->frame;
+			const page_t*	page = bpage->frame;
 
 			ut_a(!zip || !bpage->oldest_modification());
 			ut_ad(bpage->zip_size());
@@ -1146,27 +1147,20 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
 				putc('\n', stderr);
 				ut_error;
 			}
-
-			break;
+		} else {
+			goto evict_zip;
 		}
-		/* fall through */
-	case BUF_BLOCK_ZIP_PAGE:
+	} else {
+evict_zip:
 		ut_a(!bpage->oldest_modification());
 		MEM_CHECK_ADDRESSABLE(bpage->zip.data, bpage->zip_size());
-		break;
-	case BUF_BLOCK_NOT_USED:
-	case BUF_BLOCK_MEMORY:
-	case BUF_BLOCK_REMOVE_HASH:
-		ut_error;
-		break;
 	}
 
 	ut_ad(!bpage->in_zip_hash);
 	buf_pool.page_hash.remove(chain, bpage);
-        page_hash_latch& hash_lock = buf_pool.page_hash.lock_get(chain);
+	page_hash_latch& hash_lock = buf_pool.page_hash.lock_get(chain);
 
-	switch (bpage->state()) {
-	case BUF_BLOCK_ZIP_PAGE:
+	if (UNIV_UNLIKELY(!bpage->frame)) {
 		ut_ad(!bpage->in_free_list);
 		ut_ad(!bpage->in_LRU_list);
 		ut_a(bpage->zip.data);
@@ -1179,19 +1173,17 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
 		buf_buddy_free(bpage->zip.data, bpage->zip_size());
 
 		buf_pool_mutex_exit_allow();
-		buf_page_free_descriptor(bpage);
-		return(false);
-
-	case BUF_BLOCK_FILE_PAGE:
+		ut_free(bpage);
+		return false;
+	} else {
 		static_assert(FIL_NULL == 0xffffffffU, "fill pattern");
 		static_assert(FIL_PAGE_OFFSET % 4 == 0, "alignment");
-		memset_aligned<4>(reinterpret_cast<buf_block_t*>(bpage)->frame
-				  + FIL_PAGE_OFFSET, 0xff, 4);
+		memset_aligned<4>(bpage->frame + FIL_PAGE_OFFSET, 0xff, 4);
 		static_assert(FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID % 4 == 2,
 			      "not perfect alignment");
-		memset_aligned<2>(reinterpret_cast<buf_block_t*>(bpage)->frame
+		memset_aligned<2>(bpage->frame
 				  + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID, 0xff, 4);
-		MEM_UNDEFINED(((buf_block_t*) bpage)->frame, srv_page_size);
+		MEM_UNDEFINED(bpage->frame, srv_page_size);
 		bpage->set_state(BUF_BLOCK_REMOVE_HASH);
 
 		if (!zip) {
@@ -1236,16 +1228,8 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
 			page_zip_set_size(&bpage->zip, 0);
 		}
 
-		return(true);
-
-	case BUF_BLOCK_NOT_USED:
-	case BUF_BLOCK_MEMORY:
-	case BUF_BLOCK_REMOVE_HASH:
-		break;
+		return true;
 	}
-
-	ut_error;
-	return(false);
 }
 
 /** Release and evict a corrupted page.
@@ -1264,7 +1248,7 @@ ATTRIBUTE_COLD void buf_pool_t::corrupted_evict(buf_page_t *bpage)
   bpage->set_corrupt_id();
   bpage->io_unfix();
 
-  if (bpage->state() == BUF_BLOCK_FILE_PAGE)
+  if (UNIV_LIKELY(bpage->frame != nullptr))
     reinterpret_cast<buf_block_t*>(bpage)->lock.x_unlock(true);
 
   while (bpage->buf_fix_count())
@@ -1388,20 +1372,11 @@ void buf_LRU_validate()
 	for (buf_page_t* bpage = UT_LIST_GET_FIRST(buf_pool.LRU);
 	     bpage != NULL;
              bpage = UT_LIST_GET_NEXT(LRU, bpage)) {
-
-		switch (bpage->state()) {
-		case BUF_BLOCK_NOT_USED:
-		case BUF_BLOCK_MEMORY:
-		case BUF_BLOCK_REMOVE_HASH:
-			ut_error;
-			break;
-		case BUF_BLOCK_FILE_PAGE:
-			ut_ad(reinterpret_cast<buf_block_t*>(bpage)
-			      ->in_unzip_LRU_list
-			      == bpage->belongs_to_unzip_LRU());
-		case BUF_BLOCK_ZIP_PAGE:
-			break;
-		}
+		ut_ad(bpage->in_file());
+		ut_ad(!bpage->frame
+		      || reinterpret_cast<buf_block_t*>(bpage)
+		      ->in_unzip_LRU_list
+		      == bpage->belongs_to_unzip_LRU());
 
 		if (bpage->is_old()) {
 			const buf_page_t*	prev
@@ -1455,6 +1430,7 @@ void buf_LRU_print()
 	     bpage != NULL;
 	     bpage = UT_LIST_GET_NEXT(LRU, bpage)) {
 		const page_id_t id(bpage->id());
+		ut_ad(bpage->in_file());
 
 		fprintf(stderr, "BLOCK space %u page %u ",
 			id.space(), id.page_no());

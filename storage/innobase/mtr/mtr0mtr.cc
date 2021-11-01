@@ -169,8 +169,8 @@ struct FindPage
 		buf_block_t* block = reinterpret_cast<buf_block_t*>(
 			slot->object);
 
-		if (m_ptr < block->frame
-		    || m_ptr >= block->frame + srv_page_size) {
+		if (m_ptr < block->page.frame
+		    || m_ptr >= block->page.frame + srv_page_size) {
 			return(true);
 		}
 		ut_ad(!(slot->type & MTR_MEMO_PAGE_S_FIX)
@@ -1196,8 +1196,8 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
 #endif /* BTR_CUR_HASH_ADAPT */
 
 done:
-  ut_ad(page_id_t(page_get_space_id(block->frame),
-                  page_get_page_no(block->frame)) == block->page.id());
+  ut_ad(page_id_t(page_get_space_id(block->page.frame),
+                  page_get_page_no(block->page.frame)) == block->page.id());
   memo_push(block, fix_type);
 }
 

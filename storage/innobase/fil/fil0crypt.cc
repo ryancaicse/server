@@ -379,7 +379,7 @@ void fil_space_crypt_t::write_page0(buf_block_t* block, mtr_t* mtr)
 {
 	const ulint offset = FSP_HEADER_OFFSET
 		+ fsp_header_get_encryption_offset(block->zip_size());
-	byte* b = block->frame + offset;
+	byte* b = block->page.frame + offset;
 
 	mtr->memcpy<mtr_t::MAYBE_NOP>(*block, b, CRYPT_MAGIC, MAGIC_SZ);
 
@@ -967,7 +967,7 @@ fil_crypt_read_crypt_data(fil_space_t* space)
 		mysql_mutex_lock(&fil_system.mutex);
 		if (!space->crypt_data && !space->is_stopping()) {
 			space->crypt_data = fil_space_read_crypt_data(
-				zip_size, block->frame);
+				zip_size, block->page.frame);
 		}
 		mysql_mutex_unlock(&fil_system.mutex);
 	}

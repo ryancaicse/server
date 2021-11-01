@@ -356,7 +356,7 @@ buf_buddy_block_free(void* buf)
 	HASH_SEARCH(hash, &buf_pool.zip_hash, fold, buf_page_t*, bpage,
 		    ut_ad(bpage->state() == BUF_BLOCK_MEMORY
 			  && bpage->in_zip_hash),
-		    ((buf_block_t*) bpage)->frame == buf);
+		    bpage->frame == buf);
 	ut_a(bpage);
 	ut_a(bpage->state() == BUF_BLOCK_MEMORY);
 	ut_ad(bpage->in_zip_hash);
@@ -384,8 +384,8 @@ buf_buddy_block_register(
 	const ulint	fold = BUF_POOL_ZIP_FOLD(block);
 	ut_ad(block->page.state() == BUF_BLOCK_MEMORY);
 
-	ut_a(block->frame);
-	ut_a(!ut_align_offset(block->frame, srv_page_size));
+	ut_a(block->page.frame);
+	ut_a(!ut_align_offset(block->page.frame, srv_page_size));
 
 	ut_ad(!block->page.in_zip_hash);
 	ut_d(block->page.in_zip_hash = true);
@@ -461,8 +461,8 @@ byte *buf_buddy_alloc_low(ulint i, bool *lru)
 alloc_big:
 	buf_buddy_block_register(block);
 
-	block = (buf_block_t*) buf_buddy_alloc_from(
-		block->frame, i, BUF_BUDDY_SIZES);
+	block = reinterpret_cast<buf_block_t*>(
+		buf_buddy_alloc_from(block->page.frame, i, BUF_BUDDY_SIZES));
 
 func_exit:
 	buf_pool.buddy_stat[i].used++;
@@ -693,7 +693,7 @@ buf_buddy_realloc(void* buf, ulint size)
 
 		block = reinterpret_cast<buf_block_t*>(
 			buf_buddy_alloc_from(
-				block->frame, i, BUF_BUDDY_SIZES));
+				block->page.frame, i, BUF_BUDDY_SIZES));
 	}
 
 	buf_pool.buddy_stat[i].used++;

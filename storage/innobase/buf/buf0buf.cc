@@ -219,7 +219,7 @@ buf_pool.LRU.
 
 The chains of free memory blocks (buf_pool.zip_free[]) are used by
 the buddy allocator (buf0buddy.cc) to keep track of currently unused
-memory blocks of size sizeof(buf_page_t)..srv_page_size / 2.  These
+memory blocks of size 1024..srv_page_size / 2.  These
 blocks are inside the srv_page_size-sized memory blocks of type
 BUF_BLOCK_MEMORY that the buddy allocator requests from the buffer
 pool.  The buddy allocator is solely used for allocating control
@@ -400,8 +400,7 @@ static bool buf_page_decrypt_after_read(buf_page_t *bpage,
 	ut_ad(node.space->id == bpage->id().space());
 	const auto flags = node.space->flags;
 
-	byte* dst_frame = bpage->zip.data ? bpage->zip.data :
-		((buf_block_t*) bpage)->frame;
+	byte* dst_frame = bpage->zip.data ? bpage->zip.data : bpage->frame;
 	bool page_compressed = node.space->is_compressed()
 		&& buf_page_is_compressed(dst_frame, flags);
 	const page_id_t id(bpage->id());
@@ -979,7 +978,7 @@ buf_block_init(buf_block_t* block, byte* frame)
 	buf_pool.resize(). Either way, adaptive hash index must not exist. */
 	assert_block_ahi_empty_on_init(block);
 
-	block->frame = frame;
+	block->page.frame = frame;
 
 	MEM_MAKE_DEFINED(&block->modify_clock, sizeof block->modify_clock);
 	ut_ad(!block->modify_clock);
@@ -1289,8 +1288,8 @@ void buf_pool_t::close()
           ? (oldest == 0 || oldest == 2)
           : oldest <= 1 || srv_is_being_started || srv_fast_shutdown == 2);
 
-    if (bpage->state() != BUF_BLOCK_FILE_PAGE)
-      buf_page_free_descriptor(bpage);
+    if (UNIV_UNLIKELY(!bpage->frame))
+      ut_free(bpage);
   }
 
   for (auto chunk= chunks + n_chunks; --chunk >= chunks; )
@@ -1347,9 +1346,12 @@ inline bool buf_pool_t::realloc(buf_block_t *block)
 
 	if (block->page.can_relocate()) {
 		memcpy_aligned<OS_FILE_LOG_BLOCK_SIZE>(
-			new_block->frame, block->frame, srv_page_size);
+			new_block->page.frame, block->page.frame,
+			srv_page_size);
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
+		const auto frame = new_block->page.frame;
 		new (&new_block->page) buf_page_t(block->page);
+		new_block->page.frame = frame;
 
 		/* relocate LRU list */
 		if (buf_page_t*	prev_b = buf_pool.LRU_remove(&block->page)) {
@@ -1393,12 +1395,13 @@ inline bool buf_pool_t::realloc(buf_block_t *block)
 					   &new_block->page);
 		buf_block_modify_clock_inc(block);
 		static_assert(FIL_PAGE_OFFSET % 4 == 0, "alignment");
-		memset_aligned<4>(block->frame + FIL_PAGE_OFFSET, 0xff, 4);
+		memset_aligned<4>(block->page.frame
+				  + FIL_PAGE_OFFSET, 0xff, 4);
 		static_assert(FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID % 4 == 2,
 			      "not perfect alignment");
-		memset_aligned<2>(block->frame
+		memset_aligned<2>(block->page.frame
 				  + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID, 0xff, 4);
-		MEM_UNDEFINED(block->frame, srv_page_size);
+		MEM_UNDEFINED(block->page.frame, srv_page_size);
 		block->page.set_state(BUF_BLOCK_REMOVE_HASH);
 		if (!fsp_is_system_temporary(id.space())) {
 			buf_flush_relocate_on_flush_list(&block->page,
@@ -1515,45 +1518,38 @@ inline bool buf_pool_t::withdraw_blocks()
 		ulint	count2 = 0;
 
 		mysql_mutex_lock(&mutex);
-		buf_page_t*	bpage;
-		bpage = UT_LIST_GET_FIRST(LRU);
-		while (bpage != NULL) {
-			buf_page_t* next_bpage = UT_LIST_GET_NEXT(LRU, bpage);
-			if (bpage->zip.data != NULL
+		buf_pool_mutex_exit_forbid();
+		for (buf_page_t* bpage = UT_LIST_GET_FIRST(LRU), *next_bpage;
+		     bpage; bpage = next_bpage) {
+			ut_ad(bpage->in_file());
+			next_bpage = UT_LIST_GET_NEXT(LRU, bpage);
+			if (UNIV_LIKELY_NULL(bpage->zip.data)
 			    && will_be_withdrawn(bpage->zip.data)
 			    && bpage->can_relocate()) {
-				buf_pool_mutex_exit_forbid();
 				if (!buf_buddy_realloc(
 					    bpage->zip.data,
 					    page_zip_get_size(&bpage->zip))) {
 					/* failed to allocate block */
-					buf_pool_mutex_exit_allow();
 					break;
 				}
-				buf_pool_mutex_exit_allow();
+				count2++;
+				if (bpage->frame) {
+					goto realloc_frame;
+				}
+			}
+
+			if (bpage->frame && will_be_withdrawn(*bpage)
+			    && bpage->can_relocate()) {
+realloc_frame:
+				if (!realloc(reinterpret_cast<buf_block_t*>(
+						     bpage))) {
+					/* failed to allocate block */
+					break;
+				}
 				count2++;
 			}
-
-			if (bpage->state() == BUF_BLOCK_FILE_PAGE
-			    && will_be_withdrawn(*bpage)) {
-				if (bpage->can_relocate()) {
-					buf_pool_mutex_exit_forbid();
-					if (!realloc(
-						reinterpret_cast<buf_block_t*>(
-							bpage))) {
-						/* failed to allocate block */
-						buf_pool_mutex_exit_allow();
-						break;
-					}
-					buf_pool_mutex_exit_allow();
-					count2++;
-				}
-				/* NOTE: if the page is in use,
-				not relocated yet */
-			}
-
-			bpage = next_bpage;
 		}
+		buf_pool_mutex_exit_allow();
 		mysql_mutex_unlock(&mutex);
 
 		buf_resize_status(
@@ -2055,15 +2051,18 @@ static void buf_relocate(buf_page_t *bpage, buf_page_t *dpage)
   const page_id_t id= bpage->id();
   buf_pool_t::hash_chain &chain= buf_pool.page_hash.cell_get(id.fold());
   ut_ad(bpage->state() == BUF_BLOCK_ZIP_PAGE);
+  ut_ad(!bpage->frame);
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(buf_pool.page_hash.lock_get(chain).is_write_locked());
   ut_a(bpage->io_fix() == BUF_IO_NONE);
   ut_a(!bpage->buf_fix_count());
   ut_ad(bpage == buf_pool.page_hash.get(id, chain));
   ut_ad(!buf_pool.watch_is_sentinel(*bpage));
-  ut_ad(bpage->state() == BUF_BLOCK_ZIP_PAGE);
+  const auto frame= dpage->frame;
 
   new (dpage) buf_page_t(*bpage);
+
+  dpage->frame= frame;
 
   /* Important that we adjust the hazard pointer before
   removing bpage from LRU list. */
@@ -2255,7 +2254,7 @@ void buf_page_free(fil_space_t *space, uint32_t page, mtr_t *mtr)
 
 /** Get read access to a compressed page (usually of type
 FIL_PAGE_TYPE_ZBLOB or FIL_PAGE_TYPE_ZBLOB2).
-The page must be released with buf_page_release_zip().
+The page must be released with unfix().
 NOTE: the page is not protected by any latch.  Mutual exclusion has to
 be implemented at a higher level.  In other words, all possible
 accesses to a given page through this function must be protected by
@@ -2392,7 +2391,7 @@ buf_zip_decompress(
 	case FIL_PAGE_INDEX:
 	case FIL_PAGE_RTREE:
 		if (page_zip_decompress(&block->page.zip,
-					block->frame, TRUE)) {
+					block->page.frame, TRUE)) {
 			if (space) {
 				space->release();
 			}
@@ -2411,7 +2410,7 @@ buf_zip_decompress(
 	case FIL_PAGE_TYPE_ZBLOB:
 	case FIL_PAGE_TYPE_ZBLOB2:
 		/* Copy to uncompressed storage. */
-		memcpy(block->frame, frame, block->zip_size());
+		memcpy(block->page.frame, frame, block->zip_size());
 		if (space) {
 			space->release();
 		}
@@ -2834,7 +2833,7 @@ evict_from_pool:
 			block->page.ibuf_exist = true;
 		}
 
-		buf_page_free_descriptor(bpage);
+		ut_free(bpage);
 
 		/* Decompress the page while not holding
 		buf_pool.mutex. */
@@ -2950,8 +2949,8 @@ re_evict:
 
 	if (block->page.status != buf_page_t::FREED
 	    && allow_ibuf_merge
-	    && fil_page_get_type(block->frame) == FIL_PAGE_INDEX
-	    && page_is_leaf(block->frame)) {
+	    && fil_page_get_type(block->page.frame) == FIL_PAGE_INDEX
+	    && page_is_leaf(block->page.frame)) {
 		block->lock.x_lock();
 
 		if (block->page.ibuf_exist) {
@@ -3013,8 +3012,9 @@ buf_page_get_gen(
       ibuf_page_exists(page_id, block->zip_size());
     if (block->page.status == buf_page_t::FREED)
       ut_ad(mode == BUF_GET_POSSIBLY_FREED || mode == BUF_PEEK_IF_IN_POOL);
-    else if (must_merge && fil_page_get_type(block->frame) == FIL_PAGE_INDEX &&
-	     page_is_leaf(block->frame))
+    else if (must_merge &&
+             fil_page_get_type(block->page.frame) == FIL_PAGE_INDEX &&
+             page_is_leaf(block->page.frame))
     {
       block->lock.x_lock();
       block->page.ibuf_exist= false;
@@ -3263,7 +3263,7 @@ loop:
       free_block->page.set_state(BUF_BLOCK_FILE_PAGE);
       buf_unzip_LRU_add_block(free_block, FALSE);
       hash_lock.unlock();
-      buf_page_free_descriptor(&block->page);
+      ut_free(reinterpret_cast<buf_page_t*>(block));
       block= free_block;
       buf_block_buf_fix_inc(block);
       mtr_memo_push(mtr, block, MTR_MEMO_PAGE_X_FIX);
@@ -3337,8 +3337,8 @@ loop:
     ibuf_merge_or_delete_for_page(nullptr, page_id, zip_size);
 
   static_assert(FIL_PAGE_PREV + 4 == FIL_PAGE_NEXT, "adjacent");
-  memset_aligned<8>(block->frame + FIL_PAGE_PREV, 0xff, 8);
-  mach_write_to_2(block->frame + FIL_PAGE_TYPE, FIL_PAGE_TYPE_ALLOCATED);
+  memset_aligned<8>(block->page.frame + FIL_PAGE_PREV, 0xff, 8);
+  mach_write_to_2(block->page.frame + FIL_PAGE_TYPE, FIL_PAGE_TYPE_ALLOCATED);
 
   /* FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION is only used on the
   following pages:
@@ -3346,8 +3346,8 @@ loop:
   (2) FIL_RTREE_SPLIT_SEQ_NUM on R-tree pages
   (3) key_version on encrypted pages (not page 0:0) */
 
-  memset(block->frame + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION, 0, 8);
-  memset_aligned<8>(block->frame + FIL_PAGE_LSN, 0, 8);
+  memset(block->page.frame + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION, 0, 8);
+  memset_aligned<8>(block->page.frame + FIL_PAGE_LSN, 0, 8);
 
 #ifdef UNIV_DEBUG
   if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
@@ -3395,14 +3395,11 @@ counter value in MONITOR_MODULE_BUF_PAGE.
 ATTRIBUTE_COLD __attribute__((nonnull))
 void buf_page_monitor(const buf_page_t *bpage, buf_io_fix io_type)
 {
-	const byte*	frame;
 	monitor_id_t	counter;
 
 	ut_ad(io_type == BUF_IO_READ || io_type == BUF_IO_WRITE);
 
-	frame = bpage->zip.data
-		? bpage->zip.data
-		: ((buf_block_t*) bpage)->frame;
+	const byte* frame = bpage->zip.data ? bpage->zip.data : bpage->frame;
 
 	switch (fil_page_get_type(frame)) {
 		ulint	level;
@@ -3553,8 +3550,7 @@ static dberr_t buf_page_check_corrupt(buf_page_t *bpage,
 {
 	ut_ad(node.space->referenced());
 
-	byte* dst_frame = (bpage->zip.data) ? bpage->zip.data :
-		((buf_block_t*) bpage)->frame;
+	byte* dst_frame = bpage->zip.data ? bpage->zip.data : bpage->frame;
 	dberr_t err = DB_SUCCESS;
 	uint key_version = buf_page_get_key_version(dst_frame,
 						    node.space->flags);
@@ -3639,9 +3635,7 @@ dberr_t buf_page_read_complete(buf_page_t *bpage, const fil_node_t &node)
   ut_ad(!!bpage->zip.ssize == !!bpage->zip.data);
   ut_ad(bpage->state() == BUF_BLOCK_FILE_PAGE || bpage->zip.data);
 
-  const byte *frame= bpage->zip.data
-    ? bpage->zip.data
-    : reinterpret_cast<buf_block_t*>(bpage)->frame;
+  const byte *frame= bpage->zip.data ? bpage->zip.data : bpage->frame;
   ut_ad(frame);
 
   dberr_t err;
@@ -3707,7 +3701,7 @@ database_corrupted:
                     goto page_not_corrupt;);
 
     if (bpage->zip.data && bpage->state() == BUF_BLOCK_FILE_PAGE)
-      memset(reinterpret_cast<buf_block_t*>(bpage)->frame, 0, srv_page_size);
+      memset_aligned<UNIV_PAGE_SIZE_MIN>(bpage->frame, 0, srv_page_size);
 
     if (err == DB_PAGE_CORRUPTED)
     {
@@ -3988,7 +3982,7 @@ void buf_pool_t::print()
 		ulint		n_blocks	= chunk->size;
 
 		for (; n_blocks--; block++) {
-			const buf_frame_t* frame = block->frame;
+			const buf_frame_t* frame = block->page.frame;
 
 			if (fil_page_index_page_check(frame)) {
 
