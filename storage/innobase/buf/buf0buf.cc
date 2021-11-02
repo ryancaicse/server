@@ -1499,7 +1499,7 @@ inline bool buf_pool_t::withdraw_blocks()
 				std::max<ulint>(withdraw_target
 						- UT_LIST_GET_LEN(withdraw),
 						srv_LRU_scan_depth));
-			buf_flush_wait_batch_end_acquiring_mutex(true);
+			buf_flush_wait_LRU_batch_end_acquiring_mutex();
 		}
 
 		/* relocate blocks/buddies in withdrawn area */
@@ -3717,9 +3717,6 @@ All pages must be in a replaceable state (not modified or latched). */
 void buf_pool_invalidate()
 {
 	mysql_mutex_lock(&buf_pool.mutex);
-
-	buf_flush_wait_batch_end(true);
-	buf_flush_wait_batch_end(false);
 
 	/* It is possible that a write batch that has been posted
 	earlier is still not complete. For buffer pool invalidation to

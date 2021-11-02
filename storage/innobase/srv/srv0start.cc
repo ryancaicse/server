@@ -250,6 +250,7 @@ static dberr_t create_log_file(bool create_new_db, lsn_t lsn,
 
 	DBUG_PRINT("ib_log", ("After innodb_log_abort_6"));
 	DBUG_ASSERT(!buf_pool.any_io_pending());
+	DBUG_ASSERT(!os_aio_pending_writes());
 
 	DBUG_EXECUTE_IF("innodb_log_abort_7", return DB_ERROR;);
 	DBUG_PRINT("ib_log", ("After innodb_log_abort_7"));
@@ -892,8 +893,7 @@ static lsn_t srv_prepare_to_delete_redo_log_file(bool old_exists)
   ut_ad(!recv_sys.recovery_on);
   recv_sys.recovery_on= true;
 
-  /* Clean the buffer pool. */
-  buf_flush_sync_batch(log_sys.get_lsn());
+  buf_flush_sync();
 
   if (log_sys.log.subformat != 2)
     srv_log_file_size= 0;
@@ -936,7 +936,7 @@ static lsn_t srv_prepare_to_delete_redo_log_file(bool old_exists)
   }
 
   ut_ad(flushed_lsn == log_sys.get_lsn());
-  ut_ad(!buf_pool.any_io_pending());
+  ut_ad(!os_aio_pending_writes());
 
   DBUG_RETURN(flushed_lsn);
 }
@@ -1929,11 +1929,8 @@ void innodb_shutdown()
 		break;
 	case SRV_OPERATION_RESTORE:
 	case SRV_OPERATION_RESTORE_EXPORT:
-		srv_shutdown_state = SRV_SHUTDOWN_CLEANUP;
-		if (!buf_page_cleaner_is_active) {
-			break;
-		}
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
+		srv_shutdown_state = SRV_SHUTDOWN_CLEANUP;
 		while (buf_page_cleaner_is_active) {
 			pthread_cond_signal(&buf_pool.do_flush_list);
 			my_cond_wait(&buf_pool.done_flush_list,
