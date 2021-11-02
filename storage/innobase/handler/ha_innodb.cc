@@ -3723,6 +3723,16 @@ static void innodb_buffer_pool_size_init()
 	innobase_buffer_pool_size = srv_buf_pool_size;
 }
 
+namespace deprecated {
+static const char* ignored= "Deprecated parameter with no effect.";
+
+/** Deprecated parameter with no effect */
+static my_bool innodb_force_load_corrupted;
+/** Deprecation message for innodb_log_checksums */
+static const char* force_load_corrupted_msg=
+  "The parameter innodb_force_load_corrupted is deprecated and has no effect.";
+};
+
 /** Initialize, validate and normalize the InnoDB startup parameters.
 @return failure code
 @retval 0 on success
@@ -3733,6 +3743,11 @@ static int innodb_init_params()
 	DBUG_ENTER("innodb_init_params");
 
 	ulong		num_pll_degree;
+
+	if (UNIV_UNLIKELY(deprecated::innodb_force_load_corrupted)) {
+		sql_print_warning(deprecated::force_load_corrupted_msg);
+		deprecated::innodb_force_load_corrupted = false;
+	}
 
 	/* Check that values don't overflow on 32-bit systems. */
 	if (sizeof(ulint) == 4) {
@@ -18883,10 +18898,10 @@ static MYSQL_SYSVAR_ENUM(flush_method, srv_file_flush_method,
   NULL, NULL, IF_WIN(SRV_ALL_O_DIRECT_FSYNC, SRV_O_DIRECT),
   &innodb_flush_method_typelib);
 
-static MYSQL_SYSVAR_BOOL(force_load_corrupted, srv_load_corrupted,
+static MYSQL_SYSVAR_BOOL(force_load_corrupted,
+  deprecated::innodb_force_load_corrupted,
   PLUGIN_VAR_NOCMDARG | PLUGIN_VAR_READONLY,
-  "Force InnoDB to load metadata of corrupted table.",
-  NULL, NULL, FALSE);
+  deprecated::ignored, nullptr, nullptr, false);
 
 static MYSQL_SYSVAR_STR(log_group_home_dir, srv_log_group_home_dir,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
