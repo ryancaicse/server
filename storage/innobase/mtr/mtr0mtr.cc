@@ -497,7 +497,7 @@ struct Shrink
       ut_ad(bpage.state() == BUF_BLOCK_LRU);
       ut_ad(bpage.frame);
       if (bpage.oldest_modification() > 1)
-        bpage.clear_oldest_modification(false);
+        bpage.reset_oldest_modification();
       slot->type= static_cast<mtr_memo_type_t>(slot->type & ~MTR_MEMO_MODIFY);
     }
     return true;
