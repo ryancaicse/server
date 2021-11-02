@@ -6811,7 +6811,7 @@ struct btr_blob_log_check_t {
 		if (UNIV_UNLIKELY(m_op == BTR_STORE_INSERT_BULK)) {
 			offs = page_offset(*m_rec);
 			page_no = (*m_block)->page.id().page_no();
-			buf_block_buf_fix_inc(*m_block);
+			(*m_block)->page.fix();
 			ut_ad(page_no != FIL_NULL);
 		} else {
 			btr_pcur_store_position(m_pcur, m_mtr);
@@ -6836,7 +6836,7 @@ struct btr_blob_log_check_t {
 				= m_pcur->btr_cur.page_cur.block->page.frame
 				+ offs;
 
-			buf_block_buf_fix_dec(m_pcur->btr_cur.page_cur.block);
+			m_pcur->btr_cur.page_cur.block->page.unfix();
 		} else {
 			ut_ad(m_pcur->rel_pos == BTR_PCUR_ON);
 			bool ret = btr_pcur_restore_position(

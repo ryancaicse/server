@@ -839,7 +839,7 @@ PageBulk::release()
 	finish();
 
 	/* We fix the block because we will re-pin it soon. */
-	buf_block_buf_fix_inc(m_block);
+	m_block->page.fix();
 
 	/* No other threads can modify this block. */
 	m_modify_clock = buf_block_get_modify_clock(m_block);
@@ -873,11 +873,11 @@ PageBulk::latch()
 		ut_ad(m_block != NULL);
 	}
 
-	buf_block_buf_fix_dec(m_block);
+	ut_d(const auto buf_fix_count = m_block->page.unfix());
 
-	ut_ad(m_block->page.buf_fix_count());
-
-	ut_ad(m_cur_rec > m_page && m_cur_rec < m_heap_top);
+	ut_ad(buf_fix_count);
+	ut_ad(m_cur_rec > m_page);
+	ut_ad(m_cur_rec < m_heap_top);
 
 	return (m_err);
 }

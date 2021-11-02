@@ -1123,7 +1123,7 @@ fail:
 		if (latch_mode == BTR_SEARCH_LEAF) {
 			if (!block->page.lock.s_lock_try()) {
 got_no_latch:
-				buf_block_buf_fix_dec(block);
+				block->page.unfix();
 				goto fail;
 			}
 			fix_type = MTR_MEMO_PAGE_S_FIX;

@@ -2882,7 +2882,7 @@ re_evict:
 	}
 
 	if (block->page.id() != page_id) {
-		buf_block_buf_fix_dec(block);
+		block->page.unfix();
 
 		if (err) {
 			*err = DB_PAGE_CORRUPTED;
@@ -2949,7 +2949,7 @@ buf_page_get_gen(
 {
   if (buf_block_t *block= recv_sys.recover(page_id))
   {
-    buf_block_buf_fix_inc(block);
+    block->page.fix();
     if (err)
       *err= DB_SUCCESS;
     const bool must_merge= allow_ibuf_merge &&
@@ -3037,7 +3037,7 @@ buf_page_optimistic_get(
 		mtr->page_lock_upgrade(*block);
 		ut_ad(id == block->page.id());
 		ut_ad(modify_clock == block->modify_clock);
-		buf_block_buf_fix_dec(block);
+		block->page.unfix();
 		goto func_exit;
 	} else {
 		fix_type = MTR_MEMO_PAGE_X_FIX;

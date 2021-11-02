@@ -289,7 +289,10 @@ template<> inline void sux_lock<ssux_lock_impl<true>>::init()
   ut_ad(!writer.load(std::memory_order_relaxed));
   ut_ad(!recursive);
   ut_d(readers_lock.init());
-  ut_ad(!readers.load(std::memory_order_relaxed));
+#ifdef UNIV_DEBUG
+  if (auto r= readers.load(std::memory_order_relaxed))
+    ut_ad(r->empty());
+#endif
 }
 
 template<>

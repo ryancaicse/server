@@ -4293,7 +4293,7 @@ loop:
 		&pcur, &mtr);
 
 	if (block) {
-		buf_block_buf_fix_inc(block);
+		block->page.fix();
 		block->page.lock.x_lock_recursive();
 		mtr.memo_push(block, MTR_MEMO_PAGE_X_FIX);
 	}

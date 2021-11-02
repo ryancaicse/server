@@ -349,13 +349,6 @@ ib_uint64_t
 buf_block_get_modify_clock(
 /*=======================*/
 	buf_block_t*	block);	/*!< in: block */
-/*******************************************************************//**
-Increments the bufferfix count. */
-# define buf_block_buf_fix_inc(block) (block)->fix()
-
-/*******************************************************************//**
-Decrements the bufferfix count. */
-# define buf_block_buf_fix_dec(block) (block)->unfix()
 #endif /* !UNIV_INNOCHECKSUM */
 
 /** Check if a buffer is all zeroes.
