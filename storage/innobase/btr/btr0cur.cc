@@ -332,9 +332,11 @@ btr_cur_latch_leaves(
 	case BTR_MODIFY_PREV:
 		mode = latch_mode == BTR_SEARCH_PREV ? RW_S_LATCH : RW_X_LATCH;
 		/* latch also left sibling */
-		block->page.lock.s_lock();
-		left_page_no = btr_page_get_prev(block->page.frame);
-		block->page.lock.s_unlock();
+		{
+			transactional_shared_lock_guard<block_lock> g{
+				block->page.lock};
+			left_page_no = btr_page_get_prev(block->page.frame);
+		}
 
 		if (left_page_no != FIL_NULL) {
 			latch_leaves.savepoints[0] = mtr_set_savepoint(mtr);
@@ -770,15 +772,16 @@ btr_cur_optimistic_latch_leaves(
 				modify_clock, mtr));
 	case BTR_SEARCH_PREV:
 	case BTR_MODIFY_PREV:
-		block->page.lock.s_lock();
-		if (block->modify_clock != modify_clock) {
-			block->page.lock.s_unlock();
-			return false;
+		uint32_t curr_page_no, left_page_no;
+		{
+			transactional_shared_lock_guard<block_lock> g{
+				block->page.lock};
+			if (block->modify_clock != modify_clock) {
+				return false;
+			}
+			curr_page_no = block->page.id().page_no();
+			left_page_no = btr_page_get_prev(block->page.frame);
 		}
-		const uint32_t curr_page_no = block->page.id().page_no();
-		const uint32_t left_page_no = btr_page_get_prev(
-			block->page.frame);
-		block->page.lock.s_unlock();
 
 		const rw_lock_type_t mode = *latch_mode == BTR_SEARCH_PREV
 			? RW_S_LATCH : RW_X_LATCH;
@@ -1704,9 +1707,11 @@ retry_page_get:
 
 		rw_latch = upper_rw_latch;
 
-		block->page.lock.s_lock();
-		left_page_no = btr_page_get_prev(buf_block_get_frame(block));
-		block->page.lock.s_unlock();
+		{
+			transactional_shared_lock_guard<block_lock> g{
+				block->page.lock};
+			left_page_no = btr_page_get_prev(block->page.frame);
+		}
 
 		if (left_page_no != FIL_NULL) {
 			ut_ad(prev_n_blocks < leftmost_from_level);
