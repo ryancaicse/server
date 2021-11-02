@@ -260,7 +260,7 @@ rtr_pcur_getnext_from_path(
 		ut_ad(my_latch_mode == BTR_MODIFY_TREE
 		      || my_latch_mode == BTR_CONT_MODIFY_TREE
 		      || !page_is_leaf(btr_cur_get_page(btr_cur))
-		      || !btr_cur->page_cur.block->lock.have_any());
+		      || !btr_cur->page_cur.block->page.lock.have_any());
 
 		block = buf_page_get_gen(
 			page_id_t(index->table->space_id,
@@ -395,14 +395,14 @@ rtr_pcur_getnext_from_path(
 			}
 
 			if (rw_latch == RW_NO_LATCH) {
-				block->lock.s_lock();
+				block->page.lock.s_lock();
 			}
 
 			lock_prdt_lock(block, &prdt, index, LOCK_S,
 				       LOCK_PREDICATE, btr_cur->rtr_info->thr);
 
 			if (rw_latch == RW_NO_LATCH) {
-				block->lock.s_unlock();
+				block->page.lock.s_unlock();
 			}
 		}
 
@@ -926,7 +926,7 @@ rtr_create_rtr_info(
 		mysql_mutex_init(rtr_match_mutex_key,
 				 &rtr_info->matches->rtr_match_mutex,
 				 nullptr);
-		rtr_info->matches->block.lock.init();
+		rtr_info->matches->block.page.lock.init();
 	}
 
 	rtr_info->path = UT_NEW_NOKEY(rtr_node_path_t());
@@ -1071,7 +1071,7 @@ rtr_clean_rtr_info(
 				UT_DELETE(rtr_info->matches->matched_recs);
 			}
 
-			rtr_info->matches->block.lock.free();
+			rtr_info->matches->block.page.lock.free();
 
 			mysql_mutex_destroy(
 				&rtr_info->matches->rtr_match_mutex);
@@ -1484,7 +1484,7 @@ rtr_non_leaf_insert_stack_push(
 				new_seq, level, child_no, my_cursor, mbr_inc);
 }
 
-/** Copy a buf_block_t, except "block->lock".
+/** Copy a buf_block_t, except "block->page.lock".
 @param[in,out]	matches	copy to match->block
 @param[in]	block	block to copy */
 static

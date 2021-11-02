@@ -705,14 +705,14 @@ not_free:
       {
         auto block= reinterpret_cast<buf_block_t*>(bpage);
         ut_ad(buf_pool.is_uncompressed(block));
-        block->fix();
+        bpage->fix();
         buf_pool.flush_hp.set(prev);
         mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
 #ifdef BTR_CUR_HASH_ADAPT
         ut_ad(!block->index); /* There is no AHI on undo tablespaces. */
 #endif
-        block->lock.x_lock();
+        block->page.lock.x_lock();
         mysql_mutex_lock(&buf_pool.flush_list_mutex);
         ut_ad(bpage->io_fix() == BUF_IO_NONE);
 
@@ -723,8 +723,8 @@ not_free:
         }
         else
         {
-          block->lock.x_unlock();
-          block->unfix();
+          bpage->lock.x_unlock();
+          bpage->unfix();
         }
 
         if (prev != buf_pool.flush_hp.get())

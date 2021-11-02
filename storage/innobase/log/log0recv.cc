@@ -2818,23 +2818,24 @@ void recv_recover_page(fil_space_t* space, buf_page_t* bpage)
 
 	ut_ad(bpage->state() == BUF_BLOCK_LRU);
 	ut_ad(bpage->frame);
-	buf_block_t* block = reinterpret_cast<buf_block_t*>(bpage);
-
+	bpage->fix();
 	/* Move the ownership of the x-latch on the page to
 	this OS thread, so that we can acquire a second
 	x-latch on it.  This is needed for the operations to
 	the page to pass the debug checks. */
-	block->lock.claim_ownership();
-	block->lock.x_lock_recursive();
-	buf_block_buf_fix_inc(block);
-	mtr.memo_push(block, MTR_MEMO_PAGE_X_FIX);
+	bpage->lock.claim_ownership();
+	bpage->lock.x_lock_recursive();
+	mtr.memo_push(reinterpret_cast<buf_block_t*>(bpage),
+		      MTR_MEMO_PAGE_X_FIX);
 
 	mysql_mutex_lock(&recv_sys.mutex);
 	if (recv_sys.apply_log_recs) {
 		recv_sys_t::map::iterator p = recv_sys.pages.find(bpage->id());
 		if (p != recv_sys.pages.end()
 		    && !p->second.is_being_processed()) {
-			recv_recover_page(block, mtr, p, space);
+			recv_recover_page(
+				reinterpret_cast<buf_block_t*>(bpage), mtr, p,
+				space);
 			p->second.log.clear();
 			recv_sys.pages.erase(p);
 			recv_sys.maybe_finish_batch();

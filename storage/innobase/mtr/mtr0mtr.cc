@@ -166,19 +166,18 @@ struct FindPage
 			return(true);
 		}
 
-		buf_block_t* block = reinterpret_cast<buf_block_t*>(
-			slot->object);
+		buf_page_t* bpage = static_cast<buf_page_t*>(slot->object);
 
-		if (m_ptr < block->page.frame
-		    || m_ptr >= block->page.frame + srv_page_size) {
+		if (m_ptr < bpage->frame
+		    || m_ptr >= bpage->frame + srv_page_size) {
 			return(true);
 		}
 		ut_ad(!(slot->type & MTR_MEMO_PAGE_S_FIX)
-		      || block->lock.have_s());
+		      || bpage->lock.have_s());
 		ut_ad(!(slot->type & MTR_MEMO_PAGE_SX_FIX)
-		      || block->lock.have_u_or_x());
+		      || bpage->lock.have_u_or_x());
 		ut_ad(!(slot->type & MTR_MEMO_PAGE_X_FIX)
-		      || block->lock.have_x());
+		      || bpage->lock.have_x());
 		m_slot = slot;
 		return(false);
 	}
@@ -224,21 +223,21 @@ static void memo_slot_release(mtr_memo_slot_t *slot)
     static_cast<fil_space_t*>(slot->object)->s_unlock();
     break;
   default:
-#ifdef UNIV_DEBUG
-    switch (slot->type & ~MTR_MEMO_MODIFY) {
-    case MTR_MEMO_BUF_FIX:
+    buf_page_t *bpage= static_cast<buf_page_t*>(slot->object);
+    switch (auto latch= slot->type & ~MTR_MEMO_MODIFY) {
     case MTR_MEMO_PAGE_S_FIX:
+      bpage->lock.s_unlock();
+      goto unfix;
     case MTR_MEMO_PAGE_SX_FIX:
     case MTR_MEMO_PAGE_X_FIX:
-      break;
-    default:
-      ut_ad("invalid type" == 0);
-      break;
+      bpage->lock.u_or_x_unlock(latch == MTR_MEMO_PAGE_SX_FIX);
+      /* fall through */
+    case MTR_MEMO_BUF_FIX:
+      goto unfix;
     }
-#endif /* UNIV_DEBUG */
-    buf_block_t *block= static_cast<buf_block_t*>(slot->object);
-    buf_page_release_latch(block, slot->type & ~MTR_MEMO_MODIFY);
-    block->unfix();
+    ut_ad("invalid type" == 0);
+  unfix:
+    bpage->unfix();
     break;
   }
   slot->object= nullptr;
@@ -268,24 +267,24 @@ struct ReleaseLatches {
         u_or_x_unlock(type == MTR_MEMO_SX_LOCK);
       break;
     default:
-#ifdef UNIV_DEBUG
-      switch (slot->type & ~MTR_MEMO_MODIFY) {
-      case MTR_MEMO_BUF_FIX:
+      buf_page_t *bpage= static_cast<buf_page_t*>(slot->object);
+      switch (auto latch= slot->type & ~MTR_MEMO_MODIFY) {
       case MTR_MEMO_PAGE_S_FIX:
+        bpage->lock.s_unlock();
+        goto unfix;
       case MTR_MEMO_PAGE_SX_FIX:
       case MTR_MEMO_PAGE_X_FIX:
-        break;
-      default:
-        ut_ad("invalid type" == 0);
-        break;
+        bpage->lock.u_or_x_unlock(latch == MTR_MEMO_PAGE_SX_FIX);
+        /* fall through */
+      case MTR_MEMO_BUF_FIX:
+      unfix:
+        bpage->unfix();
+        goto done;
       }
-#endif /* UNIV_DEBUG */
-      buf_block_t *block= static_cast<buf_block_t*>(slot->object);
-      buf_page_release_latch(block, slot->type & ~MTR_MEMO_MODIFY);
-      block->unfix();
-      break;
+      ut_ad("invalid type" == 0);
     }
-    slot->object= NULL;
+done:
+    slot->object= nullptr;
     return true;
   }
 };
@@ -1058,7 +1057,7 @@ bool mtr_t::have_x_latch(const buf_block_t &block) const
                                  MTR_MEMO_BUF_FIX | MTR_MEMO_MODIFY));
     return false;
   }
-  ut_ad(block.lock.have_x());
+  ut_ad(block.page.lock.have_x());
   return true;
 }
 
@@ -1093,20 +1092,20 @@ static void mtr_defer_drop_ahi(buf_block_t *block, mtr_memo_type_t fix_type)
     break;
   case MTR_MEMO_PAGE_S_FIX:
     /* Temporarily release our S-latch. */
-    block->lock.s_unlock();
-    block->lock.x_lock();
+    block->page.lock.s_unlock();
+    block->page.lock.x_lock();
     if (dict_index_t *index= block->index)
       if (index->freed())
         btr_search_drop_page_hash_index(block);
-    block->lock.x_unlock();
-    block->lock.s_lock();
+    block->page.lock.x_unlock();
+    block->page.lock.s_lock();
     break;
   case MTR_MEMO_PAGE_SX_FIX:
-    block->lock.u_x_upgrade();
+    block->page.lock.u_x_upgrade();
     if (dict_index_t *index= block->index)
       if (index->freed())
         btr_search_drop_page_hash_index(block);
-    block->lock.x_u_downgrade();
+    block->page.lock.x_u_downgrade();
     break;
   default:
     ut_ad(fix_type == MTR_MEMO_PAGE_X_FIX);
@@ -1132,7 +1131,7 @@ struct UpgradeX
 /** Upgrade U locks on a block to X */
 void mtr_t::page_lock_upgrade(const buf_block_t &block)
 {
-  ut_ad(block.lock.have_x());
+  ut_ad(block.page.lock.have_x());
   m_memo.for_each_block(CIterate<UpgradeX>((UpgradeX(block))));
 #ifdef BTR_CUR_HASH_ADAPT
   ut_ad(!block.index || !block.index->freed());
@@ -1173,16 +1172,16 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
     goto done;
   case RW_S_LATCH:
     fix_type= MTR_MEMO_PAGE_S_FIX;
-    block->lock.s_lock();
+    block->page.lock.s_lock();
     break;
   case RW_SX_LATCH:
     fix_type= MTR_MEMO_PAGE_SX_FIX;
-    block->lock.u_lock();
+    block->page.lock.u_lock();
     break;
   default:
     ut_ad(rw_latch == RW_X_LATCH);
     fix_type= MTR_MEMO_PAGE_X_FIX;
-    if (block->lock.x_lock_upgraded())
+    if (block->page.lock.x_lock_upgraded())
     {
       page_lock_upgrade(*block);
       block->unfix();
@@ -1278,7 +1277,7 @@ struct FlaggedCheck {
 		if (f & (MTR_MEMO_PAGE_S_FIX | MTR_MEMO_PAGE_SX_FIX
 			 | MTR_MEMO_PAGE_X_FIX)) {
 			block_lock* lock = &static_cast<buf_block_t*>(
-				const_cast<void*>(m_ptr))->lock;
+				const_cast<void*>(m_ptr))->page.lock;
 			ut_ad(!(f & MTR_MEMO_PAGE_S_FIX) || lock->have_s());
 			ut_ad(!(f & MTR_MEMO_PAGE_SX_FIX)
 			      || lock->have_u_or_x());

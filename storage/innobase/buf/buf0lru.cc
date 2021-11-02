@@ -956,7 +956,8 @@ func_exit:
 		/* Prevent buf_page_get_gen() from
 		decompressing the block while we release
 		hash_lock. */
-		b->set_io_fix(BUF_IO_PIN);
+		b->fix();
+		b->lock.x_lock();
 		goto release;
 	} else if (!zip) {
 release:
@@ -978,18 +979,13 @@ release:
 		MEM_MAKE_DEFINED(block->frame, srv_page_size);
 		btr_search_drop_page_hash_index(block);
 		MEM_UNDEFINED(block->frame, srv_page_size);
-
-		if (UNIV_LIKELY_NULL(b)) {
-			ut_ad(b->zip_size());
-			b->io_unfix();
-		}
-
 		mysql_mutex_lock(&buf_pool.mutex);
-	} else
+	}
 #endif
 	if (UNIV_LIKELY_NULL(b)) {
 		ut_ad(b->zip_size());
-		b->io_unfix();
+		b->lock.x_unlock();
+		b->unfix();
 	}
 
 	buf_LRU_block_free_hashed_page(block);
@@ -1073,9 +1069,9 @@ If !bpage->frame && !bpage->oldest_modification(), the object will be freed.
 @param zip        whether bpage->zip of BUF_BLOCK_FILE_PAGE should be freed
 
 If a compressed page is freed other compressed pages may be relocated.
-@retval true if bpage with bpage->frame was removed from page_hash. The
+@retval true if BUF_BLOCK_FILE_PAGE was removed from page_hash. The
 caller needs to free the page to the free list
-@retval false if block without bpage->frame was removed from page_hash. In
+@retval false if BUF_BLOCK_ZIP_PAGE was removed from page_hash. In
 this case the block is already returned to the buddy allocator. */
 static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
                                         buf_pool_t::hash_chain &chain,
@@ -1171,6 +1167,7 @@ evict_zip:
 		buf_buddy_free(bpage->zip.data, bpage->zip_size());
 
 		buf_pool_mutex_exit_allow();
+		bpage->lock.free();
 		ut_free(bpage);
 		return false;
 	} else {
@@ -1245,9 +1242,7 @@ ATTRIBUTE_COLD void buf_pool_t::corrupted_evict(buf_page_t *bpage)
   ut_ad(!bpage->oldest_modification());
   bpage->set_corrupt_id();
   bpage->io_unfix();
-
-  if (UNIV_LIKELY(bpage->frame != nullptr))
-    reinterpret_cast<buf_block_t*>(bpage)->lock.x_unlock(true);
+  bpage->lock.x_unlock(true);
 
   while (bpage->buf_fix_count())
     /* Wait for other threads to release the fix count

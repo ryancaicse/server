@@ -68,10 +68,13 @@ public:
     ut_ad(!writer.load(std::memory_order_relaxed));
     ut_ad(!recursive);
     ut_d(readers_lock.init());
-    ut_ad(!readers.load(std::memory_order_relaxed));
+#ifdef UNIV_DEBUG
+    if (auto r= readers.load(std::memory_order_relaxed))
+      ut_ad(r->empty());
+#endif
   }
 
-  /** Free the rw-lock after create() */
+  /** Free the rw-lock after init() */
   void free()
   {
     ut_ad(!writer.load(std::memory_order_relaxed));

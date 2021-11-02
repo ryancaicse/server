@@ -1164,10 +1164,11 @@ sel_set_rtr_rec_lock(
 	ut_ad(page_align(first_rec) == cur_block->page.frame);
 	ut_ad(match->valid);
 
-	match->block.lock.x_lock();
+	match->block.page.lock.x_lock();
 retry:
 	cur_block = btr_pcur_get_block(pcur);
-	ut_ad(match->block.lock.have_x() || match->block.lock.have_s());
+	ut_ad(match->block.page.lock.have_x()
+	      || match->block.page.lock.have_s());
 	ut_ad(page_is_leaf(cur_block->page.frame));
 
 	err = lock_sec_rec_read_check_and_lock(
@@ -1281,7 +1282,7 @@ re_scan:
 	match->locked = true;
 
 func_end:
-	match->block.lock.x_unlock();
+	match->block.page.lock.x_unlock();
 	if (heap != NULL) {
 		mem_heap_free(heap);
 	}

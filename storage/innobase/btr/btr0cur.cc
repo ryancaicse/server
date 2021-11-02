@@ -332,9 +332,9 @@ btr_cur_latch_leaves(
 	case BTR_MODIFY_PREV:
 		mode = latch_mode == BTR_SEARCH_PREV ? RW_S_LATCH : RW_X_LATCH;
 		/* latch also left sibling */
-		block->lock.s_lock();
+		block->page.lock.s_lock();
 		left_page_no = btr_page_get_prev(block->page.frame);
-		block->lock.s_unlock();
+		block->page.lock.s_unlock();
 
 		if (left_page_no != FIL_NULL) {
 			latch_leaves.savepoints[0] = mtr_set_savepoint(mtr);
@@ -770,15 +770,15 @@ btr_cur_optimistic_latch_leaves(
 				modify_clock, mtr));
 	case BTR_SEARCH_PREV:
 	case BTR_MODIFY_PREV:
-		block->lock.s_lock();
+		block->page.lock.s_lock();
 		if (block->modify_clock != modify_clock) {
-			block->lock.s_unlock();
+			block->page.lock.s_unlock();
 			return false;
 		}
 		const uint32_t curr_page_no = block->page.id().page_no();
 		const uint32_t left_page_no = btr_page_get_prev(
 			block->page.frame);
-		block->lock.s_unlock();
+		block->page.lock.s_unlock();
 
 		const rw_lock_type_t mode = *latch_mode == BTR_SEARCH_PREV
 			? RW_S_LATCH : RW_X_LATCH;
@@ -1704,9 +1704,9 @@ retry_page_get:
 
 		rw_latch = upper_rw_latch;
 
-		block->lock.s_lock();
+		block->page.lock.s_lock();
 		left_page_no = btr_page_get_prev(buf_block_get_frame(block));
-		block->lock.s_unlock();
+		block->page.lock.s_unlock();
 
 		if (left_page_no != FIL_NULL) {
 			ut_ad(prev_n_blocks < leftmost_from_level);
@@ -2003,14 +2003,14 @@ retry_page_get:
 		}
 
 		if (rw_latch == RW_NO_LATCH && height != 0) {
-			block->lock.s_lock();
+			block->page.lock.s_lock();
 		}
 
 		lock_prdt_lock(block, &prdt, index, LOCK_S,
 			       LOCK_PREDICATE, cursor->thr);
 
 		if (rw_latch == RW_NO_LATCH && height != 0) {
-			block->lock.s_unlock();
+			block->page.lock.s_unlock();
 		}
 	}
 
@@ -2084,7 +2084,7 @@ need_opposite_intention:
 					ut_ad(mtr->memo_contains_flagged(
 						&index->lock, MTR_MEMO_X_LOCK
 						| MTR_MEMO_SX_LOCK));
-					block->lock.s_lock();
+					block->page.lock.s_lock();
 					add_latch = true;
 				}
 
@@ -2116,7 +2116,7 @@ need_opposite_intention:
 				}
 
 				if (add_latch) {
-					block->lock.s_unlock();
+					block->page.lock.s_unlock();
 				}
 
 				ut_ad(!page_rec_is_supremum(node_ptr));
@@ -7713,10 +7713,12 @@ inflate_error:
 			}
 
 end_of_blob:
+			bpage->lock.s_unlock();
 			bpage->unfix();
 			goto func_exit;
 		}
 
+		bpage->lock.s_unlock();
 		bpage->unfix();
 
 		/* On other BLOB pages except the first

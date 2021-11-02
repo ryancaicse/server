@@ -3817,12 +3817,11 @@ static const LEX_CSTRING io_values[] =
 {
 	{ STRING_WITH_LEN("IO_NONE") },
 	{ STRING_WITH_LEN("IO_READ") },
-	{ STRING_WITH_LEN("IO_WRITE") },
-	{ STRING_WITH_LEN("IO_PIN") }
+	{ STRING_WITH_LEN("IO_WRITE") }
 };
 
 
-static TypelibBuffer<4> io_values_typelib(io_values);
+static TypelibBuffer<3> io_values_typelib(io_values);
 
 namespace Show {
 /* Fields of the dynamic table INNODB_BUFFER_POOL_PAGE. */
@@ -4136,12 +4135,7 @@ i_s_innodb_buffer_page_get_info(
 
 		page_info->freed_page_clock = bpage->freed_page_clock;
 
-		switch (bpage->io_fix()) {
-		case BUF_IO_NONE:
-		case BUF_IO_WRITE:
-		case BUF_IO_PIN:
-			break;
-		case BUF_IO_READ:
+		if (bpage->io_fix() == BUF_IO_READ) {
 			page_info->page_type = I_S_PAGE_TYPE_UNKNOWN;
 			page_info->newest_mod = 0;
 			return;

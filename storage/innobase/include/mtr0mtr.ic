@@ -110,7 +110,7 @@ mtr_t::sx_latch_at_savepoint(
 	/* == RW_NO_LATCH */
 	ut_a(slot->type == MTR_MEMO_BUF_FIX);
 
-	block->lock.u_lock();
+	block->page.lock.u_lock();
 
 	if (!m_made_dirty) {
 		m_made_dirty = is_block_dirtied(block);
@@ -143,7 +143,7 @@ mtr_t::x_latch_at_savepoint(
 	/* == RW_NO_LATCH */
 	ut_a(slot->type == MTR_MEMO_BUF_FIX);
 
-	block->lock.x_lock();
+	block->page.lock.x_lock();
 
 	if (!m_made_dirty) {
 		m_made_dirty = is_block_dirtied(block);
@@ -160,15 +160,24 @@ mtr_t::release_block_at_savepoint(
 	ulint		savepoint,
 	buf_block_t*	block)
 {
-	ut_ad(is_active());
+  ut_ad(is_active());
 
-	mtr_memo_slot_t* slot = m_memo.at<mtr_memo_slot_t*>(savepoint);
+  mtr_memo_slot_t *slot = m_memo.at<mtr_memo_slot_t*>(savepoint);
 
-	ut_a(slot->object == block);
+  ut_a(slot->object == block);
 
-	buf_page_release_latch(block, slot->type);
+  switch (slot->type) {
+  case MTR_MEMO_PAGE_S_FIX:
+    block->page.lock.s_unlock();
+    break;
+  case MTR_MEMO_PAGE_SX_FIX:
+  case MTR_MEMO_PAGE_X_FIX:
+    block->page.lock.u_or_x_unlock(slot->type == MTR_MEMO_PAGE_SX_FIX);
+    break;
+  default:
+    break;
+  }
 
-	reinterpret_cast<buf_block_t*>(block)->unfix();
-
-	slot->object = NULL;
+  block->unfix();
+  slot->object= nullptr;
 }

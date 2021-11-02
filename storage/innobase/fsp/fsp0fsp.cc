@@ -1068,7 +1068,7 @@ fsp_page_create(fil_space_t *space, page_no_t offset, mtr_t *mtr)
     if (block)
     {
       ut_ad(block->page.buf_fix_count() >= 1);
-      ut_ad(block->lock.x_lock_count() == 1);
+      ut_ad(block->page.lock.x_lock_count() == 1);
       ut_ad(mtr->have_x_latch(*block));
       free_block= block;
       goto got_free_block;
@@ -1413,7 +1413,7 @@ fsp_alloc_seg_inode_page(fil_space_t *space, buf_block_t *header, mtr_t *mtr)
   if (!block)
     return false;
 
-  ut_ad(block->lock.not_recursive());
+  ut_ad(block->page.lock.not_recursive());
 
   mtr->write<2>(*block, block->page.frame + FIL_PAGE_TYPE, FIL_PAGE_INODE);
 
@@ -1789,8 +1789,8 @@ fseg_create(fil_space_t *space, ulint byte_offset, mtr_t *mtr,
 			goto funct_exit;
 		}
 
-		ut_d(const auto x = block->lock.x_lock_count());
-		ut_ad(x || block->lock.not_recursive());
+		ut_d(const auto x = block->page.lock.x_lock_count());
+		ut_ad(x || block->page.lock.not_recursive());
 		ut_ad(x == 1 || space->is_being_truncated);
 		ut_ad(x <= 2);
 		ut_ad(!fil_page_get_type(block->page.frame));

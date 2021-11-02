@@ -112,7 +112,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     block->initialise(page_id, zip_size);
     /* x_unlock() will be invoked
     in buf_page_read_complete() by the io-handler thread. */
-    block->lock.x_lock(true);
+    block->page.lock.x_lock(true);
   }
 
   buf_pool_t::hash_chain &chain= buf_pool.page_hash.cell_get(page_id.fold());
@@ -125,7 +125,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     /* The page is already in the buffer pool. */
     if (block)
     {
-      block->lock.x_unlock(true);
+      block->page.lock.x_unlock(true);
       buf_LRU_block_free_non_file_page(block);
     }
     goto func_exit;
@@ -205,6 +205,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     bpage->zip.data = (page_zip_t*) data;
 
     bpage->init(BUF_BLOCK_LRU, page_id);
+    bpage->lock.x_lock(true);
 
     {
       transactional_lock_guard<page_hash_latch> g

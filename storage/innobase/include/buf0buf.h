@@ -223,7 +223,7 @@ accesses to a given page through this function must be protected by
 the same set of mutexes or latches.
 @param page_id   page identifier
 @param zip_size  ROW_FORMAT=COMPRESSED page size in bytes
-@return pointer to the block */
+@return pointer to the block, s-latched */
 buf_page_t *buf_page_get_zip(const page_id_t page_id, ulint zip_size);
 
 /** Get access to a database page. Buffered redo log may be applied.
@@ -299,15 +299,6 @@ buf_block_t*
 buf_page_create_deferred(uint32_t space_id, ulint zip_size, mtr_t *mtr,
                          buf_block_t *free_block);
 
-/********************************************************************//**
-Releases a latch, if specified. */
-UNIV_INLINE
-void
-buf_page_release_latch(
-/*=====================*/
-	buf_block_t*	block,		/*!< in: buffer block */
-	ulint		rw_latch);	/*!< in: RW_S_LATCH, RW_X_LATCH,
-					RW_NO_LATCH */
 /** Move a block to the start of the LRU list. */
 void buf_page_make_young(buf_page_t *bpage);
 /** Mark the page status as FREED for the given tablespace and page number.
@@ -597,6 +588,7 @@ class buf_page_t
 {
   friend buf_pool_t;
   friend buf_block_t;
+
   /** @name General fields */
   /* @{ */
 
@@ -629,6 +621,8 @@ private:
   buf_page_state state_;
 
 public:
+  /** lock covering frame */
+  block_lock lock;
   /** pointer to aligned, uncompressed page frame of innodb_page_size */
   byte *frame;
   /** buf_pool.page_hash link; protected by buf_pool.page_hash.lock_get() */
@@ -721,22 +715,39 @@ public:
     memset((void*) this, 0, sizeof *this);
   }
 
+  buf_page_t(const buf_page_t &b) :
+    id_(b.id_), buf_fix_count_(b.buf_fix_count_),
+    oldest_modification_(b.oldest_modification_), io_fix_(b.io_fix_),
+    state_(b.state_),
+    lock() /* not copied */,
+    frame(b.frame), hash(b.hash), zip(b.zip), slot(b.slot),
+#ifdef UNIV_DEBUG
+    in_zip_hash(b.in_zip_hash), in_LRU_list(b.in_LRU_list),
+    in_page_hash(b.in_page_hash), in_free_list(b.in_free_list),
+#endif /* UNIV_DEBUG */
+    list(b.list), LRU(b.LRU), old(b.old), freed_page_clock(b.freed_page_clock),
+    access_time(b.access_time), ibuf_exist(b.ibuf_exist), status(b.status)
+  {
+    lock.init();
+  }
+
   /** Initialize some fields */
   void init()
   {
     io_fix_= BUF_IO_NONE;
     buf_fix_count_= 0;
-    old= 0;
-    freed_page_clock= 0;
-    access_time= 0;
     oldest_modification_= 0;
+    lock.init();
     slot= nullptr;
-    ibuf_exist= false;
-    status= NORMAL;
     ut_d(in_zip_hash= false);
     ut_d(in_free_list= false);
     ut_d(in_LRU_list= false);
     ut_d(in_page_hash= false);
+    old= 0;
+    freed_page_clock= 0;
+    access_time= 0;
+    ibuf_exist= false;
+    status= NORMAL;
   }
 
   /** Initialize some more fields */
@@ -764,8 +775,7 @@ public:
   buf_io_fix io_fix() const { return io_fix_; }
   void io_unfix()
   {
-    ut_d(const auto old_io_fix= io_fix());
-    ut_ad(old_io_fix == BUF_IO_READ || old_io_fix == BUF_IO_PIN);
+    ut_ad(io_fix() == BUF_IO_READ);
     io_fix_= BUF_IO_NONE;
   }
 
@@ -888,8 +898,6 @@ struct buf_block_t{
 					be the first field, so that
 					buf_pool.page_hash can point
 					to buf_page_t or buf_block_t */
-  /** read-write lock covering page.frame */
-  block_lock lock;
 #ifdef UNIV_DEBUG
   /** whether page.list is in buf_pool.withdraw
   ((state() == BUF_BLOCK_NOT_USED)) and the buffer pool is being shrunk;
@@ -1008,12 +1016,7 @@ struct buf_block_t{
 # define assert_block_ahi_valid(block) /* nothing */
 #endif /* BTR_CUR_HASH_ADAPT */
   void fix() { page.fix(); }
-  uint32_t unfix()
-  {
-    ut_ad(page.buf_fix_count() || page.io_fix() != BUF_IO_NONE ||
-          !page.frame || !lock.have_any());
-    return page.unfix();
-  }
+  uint32_t unfix() { return page.unfix(); }
 
   /** @return the physical size, in bytes */
   ulint physical_size() const { return page.physical_size(); }

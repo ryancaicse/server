@@ -1814,7 +1814,7 @@ static bool ibuf_add_free_page()
 		return false;
 	}
 
-	ut_ad(block->lock.not_recursive());
+	ut_ad(block->page.lock.not_recursive());
 	ibuf_enter(&mtr);
 	mysql_mutex_lock(&ibuf_mutex);
 
@@ -4260,7 +4260,7 @@ void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t page_id,
 		is needed for the insert operations to the index page to pass
 		the debug checks. */
 
-		block->lock.claim_ownership();
+		block->page.lock.claim_ownership();
 
 		if (!fil_page_index_page_check(block->page.frame)
 		    || !page_is_leaf(block->page.frame)) {
@@ -4294,7 +4294,7 @@ loop:
 
 	if (block) {
 		buf_block_buf_fix_inc(block);
-		block->lock.x_lock_recursive();
+		block->page.lock.x_lock_recursive();
 		mtr.memo_push(block, MTR_MEMO_PAGE_X_FIX);
 	}
 
@@ -4403,8 +4403,8 @@ loop:
 				ibuf_mtr_start(&mtr);
 				mtr.set_named_space(space);
 
-				buf_block_buf_fix_inc(block);
-				block->lock.x_lock_recursive();
+				block->page.lock.x_lock_recursive();
+				block->fix();
 				mtr.memo_push(block, MTR_MEMO_PAGE_X_FIX);
 
 				if (!ibuf_restore_pos(page_id, search_tuple,

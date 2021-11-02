@@ -409,7 +409,7 @@ static
 bool
 btr_search_update_block_hash_info(btr_search_t* info, buf_block_t* block)
 {
-	ut_ad(block->lock.have_x() || block->lock.have_s());
+	ut_ad(block->page.lock.have_x() || block->page.lock.have_s());
 
 	info->last_hash_succ = FALSE;
 	ut_ad(buf_pool.is_uncompressed(block));
@@ -693,7 +693,7 @@ btr_search_update_hash_ref(
 {
 	ut_ad(cursor->flag == BTR_CUR_HASH_FAIL);
 
-	ut_ad(block->lock.have_x() || block->lock.have_s());
+	ut_ad(block->page.lock.have_x() || block->page.lock.have_s());
 	ut_ad(page_align(btr_cur_get_rec(cursor)) == block->page.frame);
 	ut_ad(page_is_leaf(block->page.frame));
 	assert_block_ahi_valid(block);
@@ -1121,14 +1121,14 @@ fail:
 		buf_page_make_young_if_needed(&block->page);
 		mtr_memo_type_t	fix_type;
 		if (latch_mode == BTR_SEARCH_LEAF) {
-			if (!block->lock.s_lock_try()) {
+			if (!block->page.lock.s_lock_try()) {
 got_no_latch:
 				buf_block_buf_fix_dec(block);
 				goto fail;
 			}
 			fix_type = MTR_MEMO_PAGE_S_FIX;
 		} else {
-			if (!block->lock.x_lock_try()) {
+			if (!block->page.lock.x_lock_try()) {
 				goto got_no_latch;
 			}
 			fix_type = MTR_MEMO_PAGE_X_FIX;
@@ -1266,7 +1266,7 @@ retry:
 
 	ut_ad(!block->page.buf_fix_count()
 	      || block->page.state() == BUF_BLOCK_REMOVE_HASH
-	      || block->lock.have_any());
+	      || block->page.lock.have_any());
 	ut_ad(page_is_leaf(block->page.frame));
 
 	/* We must not dereference block->index here, because it could be freed
@@ -1497,7 +1497,7 @@ btr_search_build_page_hash_index(
 	ut_ad(!dict_index_is_ibuf(index));
 	ut_ad(page_is_leaf(block->page.frame));
 
-	ut_ad(block->lock.have_x() || block->lock.have_s());
+	ut_ad(block->page.lock.have_x() || block->page.lock.have_s());
 	ut_ad(block->page.id().page_no() >= 3);
 
 	ahi_latch->rd_lock(SRW_LOCK_CALL);
@@ -1718,8 +1718,8 @@ btr_search_move_or_delete_hash_entries(
 	buf_block_t*	new_block,
 	buf_block_t*	block)
 {
-	ut_ad(block->lock.have_x());
-	ut_ad(new_block->lock.have_x());
+	ut_ad(block->page.lock.have_x());
+	ut_ad(new_block->page.lock.have_x());
 
 	if (!btr_search_enabled) {
 		return;
@@ -1800,7 +1800,7 @@ void btr_search_update_hash_on_delete(btr_cur_t *cursor)
 
 	block = btr_cur_get_block(cursor);
 
-	ut_ad(block->lock.have_x());
+	ut_ad(block->page.lock.have_x());
 
 	assert_block_ahi_valid(block);
 	index = block->index;
@@ -1875,7 +1875,7 @@ void btr_search_update_hash_node_on_insert(btr_cur_t *cursor,
 
 	block = btr_cur_get_block(cursor);
 
-	ut_ad(block->lock.have_x());
+	ut_ad(block->page.lock.have_x());
 
 	index = block->index;
 
@@ -1958,7 +1958,7 @@ void btr_search_update_hash_on_insert(btr_cur_t *cursor,
 
 	block = btr_cur_get_block(cursor);
 
-	ut_ad(block->lock.have_x());
+	ut_ad(block->page.lock.have_x());
 	assert_block_ahi_valid(block);
 
 	index = block->index;

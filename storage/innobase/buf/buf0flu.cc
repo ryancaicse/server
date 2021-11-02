@@ -374,9 +374,7 @@ void buf_page_write_complete(const IORequest &request)
   bpage->clear_oldest_modification(temp);
   ut_ad(bpage->io_fix() == BUF_IO_WRITE);
   bpage->set_io_fix(BUF_IO_NONE);
-
-  if (UNIV_LIKELY(bpage->frame != nullptr))
-    reinterpret_cast<buf_block_t*>(bpage)->lock.u_unlock(true);
+  bpage->lock.u_unlock(true);
 
   if (request.is_LRU())
   {
@@ -769,8 +767,7 @@ inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
   bpage->clear_oldest_modification();
   mysql_mutex_unlock(&flush_list_mutex);
 
-  if (UNIV_LIKELY(bpage->frame != nullptr))
-    reinterpret_cast<buf_block_t*>(bpage)->lock.u_unlock(true);
+  bpage->lock.u_unlock(true);
 
   buf_LRU_free_page(bpage, true);
   mysql_mutex_unlock(&mutex);
@@ -791,23 +788,17 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
   ut_ad(space->referenced());
   ut_ad(lru || space != fil_system.temp_space);
 
-  block_lock *rw_lock;
+  if (!bpage->lock.u_lock_try(true))
+    return false;
 
-  if (UNIV_UNLIKELY(!bpage->frame))
-    rw_lock= nullptr;
-  else
+  if (!bpage->ready_for_flush() || bpage->oldest_modification() < 2)
   {
-    rw_lock= &reinterpret_cast<buf_block_t*>(bpage)->lock;
-    if (!rw_lock->u_lock_try(true))
-      return false;
+    ut_ad(bpage->frame || bpage->ready_for_flush());
+    bpage->lock.u_unlock(true);
+    return false;
   }
 
   bpage->set_io_fix(BUF_IO_WRITE);
-  /* Because bpage->status can only be changed while buf_block_t
-  exists, it cannot be modified for ROW_FORMAT=COMPRESSED pages
-  without first allocating the uncompressed page frame. Such
-  allocation cannot be completed due to our io_fix. So, bpage->status
-  is protected even if !rw_lock. */
   const auto status= bpage->status;
 
   if (status != buf_page_t::FREED)
@@ -821,12 +812,10 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
 
   mysql_mutex_assert_not_owner(&buf_pool.flush_list_mutex);
 
-  /* We are holding rw_lock = buf_block_t::lock in SX mode except if
-  this is a ROW_FORMAT=COMPRESSED page whose uncompressed page frame
-  has been evicted from the buffer pool.
+  /* We are holding buf_block_t::lock in U mode.
 
-  Apart from possible rw_lock protection, bpage is also protected by
-  io_fix and oldest_modification()!=0. Thus, it cannot be relocated in
+  bpage is also protected by io_fix and oldest_modification()>1.
+  Thus, it cannot be relocated in
   the buffer pool or removed from flush_list or LRU_list. */
 
   DBUG_PRINT("ib_buf", ("%s %u page %u:%u",
@@ -857,7 +846,7 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
 #endif
     IORequest::Type type= lru ? IORequest::WRITE_LRU : IORequest::WRITE_ASYNC;
 
-    if (UNIV_UNLIKELY(!rw_lock)) /* ROW_FORMAT=COMPRESSED */
+    if (UNIV_UNLIKELY(!bpage->frame)) /* ROW_FORMAT=COMPRESSED */
     {
       ut_ad(!space->full_crc32());
       ut_ad(!space->is_compressed()); /* not page_compressed */
@@ -1217,24 +1206,15 @@ static void buf_flush_discard_page(buf_page_t *bpage)
   ut_ad(bpage->in_file());
   ut_ad(bpage->oldest_modification());
 
-  block_lock *rw_lock;
-
-  if (UNIV_UNLIKELY(!bpage->frame))
-    rw_lock= nullptr;
-  else
-  {
-    rw_lock= &reinterpret_cast<buf_block_t*>(bpage)->lock;
-    if (!rw_lock->u_lock_try(false))
-      return;
-  }
+  if (!bpage->lock.u_lock_try(false))
+    return;
 
   bpage->status= buf_page_t::NORMAL;
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
   buf_pool.delete_from_flush_list(bpage);
   mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
-  if (rw_lock)
-    rw_lock->u_unlock();
+  bpage->lock.u_unlock();
 
   buf_LRU_free_page(bpage, true);
 }
