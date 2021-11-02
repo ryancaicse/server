@@ -633,9 +633,6 @@ public:
   !frame && !zip.data means an active buf_pool.watch */
   page_zip_des_t zip;
 
-  /** temporary memory used for ENCRYPTED or PAGE_COMPRESSED pages */
-  buf_tmp_buffer_t *slot;
-
 #ifdef UNIV_DEBUG
   /** whether this->list is in buf_pool.zip_hash; protected by buf_pool.mutex */
   bool in_zip_hash;
@@ -720,7 +717,7 @@ public:
     oldest_modification_(b.oldest_modification_), io_fix_(b.io_fix_),
     state_(b.state_),
     lock() /* not copied */,
-    frame(b.frame), hash(b.hash), zip(b.zip), slot(b.slot),
+    frame(b.frame), hash(b.hash), zip(b.zip),
 #ifdef UNIV_DEBUG
     in_zip_hash(b.in_zip_hash), in_LRU_list(b.in_LRU_list),
     in_page_hash(b.in_page_hash), in_free_list(b.in_free_list),
@@ -738,7 +735,6 @@ public:
     buf_fix_count_= 0;
     oldest_modification_= 0;
     lock.init();
-    slot= nullptr;
     ut_d(in_zip_hash= false);
     ut_d(in_free_list= false);
     ut_d(in_LRU_list= false);

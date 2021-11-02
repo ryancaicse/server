@@ -142,25 +142,6 @@ buf_block_get_modify_clock(
 	return(block->modify_clock);
 }
 
-/********************************************************************//**
-Get buf frame. */
-UNIV_INLINE
-void *
-buf_page_get_frame(
-/*===============*/
-	const buf_page_t*	bpage) /*!< in: buffer pool page */
-{
-	/* In encryption/compression buffer pool page may contain extra
-	buffer where result is stored. */
-	if (bpage->slot && bpage->slot->out_buf) {
-		return bpage->slot->out_buf;
-	} else if (bpage->zip.data) {
-		return bpage->zip.data;
-	} else {
-		return bpage->frame;
-	}
-}
-
 /** Calculate aligned buffer pool size based on srv_buf_pool_chunk_unit,
 if needed.
 @param[in]	size	size in bytes
