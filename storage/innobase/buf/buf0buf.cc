@@ -1657,16 +1657,6 @@ inline void buf_pool_t::resize()
 			  srv_buf_pool_old_size, srv_buf_pool_size,
 			  srv_buf_pool_chunk_unit);
 
-	mysql_mutex_lock(&mutex);
-	ut_ad(curr_size == old_size);
-	ut_ad(n_chunks_new == n_chunks);
-	ut_ad(UT_LIST_GET_LEN(withdraw) == 0);
-
-	n_chunks_new = (new_instance_size << srv_page_size_shift)
-		/ srv_buf_pool_chunk_unit;
-	curr_size = n_chunks_new * chunks->size;
-	mysql_mutex_unlock(&mutex);
-
 #ifdef BTR_CUR_HASH_ADAPT
 	/* disable AHI if needed */
 	buf_resize_status("Disabling adaptive hash index.");
@@ -1681,6 +1671,16 @@ inline void buf_pool_t::resize()
 		ib::info() << "disabled adaptive hash index.";
 	}
 #endif /* BTR_CUR_HASH_ADAPT */
+
+	mysql_mutex_lock(&mutex);
+	ut_ad(curr_size == old_size);
+	ut_ad(n_chunks_new == n_chunks);
+	ut_ad(UT_LIST_GET_LEN(withdraw) == 0);
+
+	n_chunks_new = (new_instance_size << srv_page_size_shift)
+		/ srv_buf_pool_chunk_unit;
+	curr_size = n_chunks_new * chunks->size;
+	mysql_mutex_unlock(&mutex);
 
 	if (curr_size < old_size) {
 		/* set withdraw target */
