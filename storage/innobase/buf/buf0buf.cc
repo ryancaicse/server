@@ -990,7 +990,7 @@ buf_block_init(buf_block_t* block, byte* frame)
 
 	page_zip_des_init(&block->page.zip);
 
-	MEM_MAKE_DEFINED(&block->lock, sizeof block->lock);
+	MEM_MAKE_DEFINED(&block->page.lock, sizeof block->page.lock);
 	block->page.lock.init();
 }
 
