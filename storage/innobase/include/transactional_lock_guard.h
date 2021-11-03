@@ -46,7 +46,11 @@ bool transactional_lock_enabled();
 #  include <immintrin.h>
 #  if defined __GNUC__ && !defined __INTEL_COMPILER
 #   define TRANSACTIONAL_TARGET __attribute__((target("rtm")))
-#   define TRANSACTIONAL_INLINE __attribute__((target("rtm"),always_inline))
+#   if __GNUC__ == 9 /* weird bug in GCC 9.3.0 */
+#    define TRANSACTIONAL_INLINE TRANSACTIONAL_TARGET
+#   else
+#    define TRANSACTIONAL_INLINE __attribute__((target("rtm"),always_inline))
+#   endif
 #  else
 #   define TRANSACTIONAL_TARGET /* nothing */
 #   define TRANSACTIONAL_INLINE /* nothing */
