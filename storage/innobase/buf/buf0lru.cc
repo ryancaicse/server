@@ -308,14 +308,12 @@ buf_block_t* buf_LRU_get_free_only()
 			assert_block_ahi_empty(block);
 
 			block->page.set_state(BUF_BLOCK_MEMORY);
-			MEM_MAKE_ADDRESSABLE(block->frame, srv_page_size);
+			MEM_MAKE_ADDRESSABLE(block->page.frame, srv_page_size);
 			break;
 		}
 
 		/* This should be withdrawn */
-		UT_LIST_ADD_LAST(
-			buf_pool.withdraw,
-			&block->page);
+		UT_LIST_ADD_LAST(buf_pool.withdraw, &block->page);
 		ut_d(block->in_withdraw_list = true);
 
 		block = reinterpret_cast<buf_block_t*>(
@@ -976,9 +974,9 @@ release:
 		the contents of the page valid (which it still is) in
 		order to avoid bogus Valgrind or MSAN warnings.*/
 
-		MEM_MAKE_DEFINED(block->frame, srv_page_size);
+		MEM_MAKE_DEFINED(block->page.frame, srv_page_size);
 		btr_search_drop_page_hash_index(block);
-		MEM_UNDEFINED(block->frame, srv_page_size);
+		MEM_UNDEFINED(block->page.frame, srv_page_size);
 		mysql_mutex_lock(&buf_pool.mutex);
 	}
 #endif
@@ -1010,7 +1008,7 @@ buf_LRU_block_free_non_file_page(
 
 	block->page.set_state(BUF_BLOCK_NOT_USED);
 
-	MEM_UNDEFINED(block->frame, srv_page_size);
+	MEM_UNDEFINED(block->page.frame, srv_page_size);
 	/* Wipe page_no and space_id */
 	static_assert(FIL_PAGE_OFFSET % 4 == 0, "alignment");
 	memset_aligned<4>(block->page.frame + FIL_PAGE_OFFSET, 0xfe, 4);
