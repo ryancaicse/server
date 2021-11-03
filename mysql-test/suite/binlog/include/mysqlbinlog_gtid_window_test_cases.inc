@@ -215,11 +215,11 @@ DROP TABLE t2;
 --echo #   Seq_no=0 in --stop-position excludes all events for a domain
 --echo # MYSQL_BINLOG BINLOG_FILE_PARAM --stop-position=0-1-0,1-2-0 | MYSQL
 --exec $MYSQL_BINLOG $BINLOG_FILE_PARAM --stop-position=0-1-0,1-2-0 | $MYSQL
-if (0 < `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't1'`)
+if (`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't1'`)
 {
     die "t1 should not exist as binlog replay should exclude domain 0 from results";
 }
-if (0 < `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
+if (`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
 {
     die "t2 should not exist as binlog replay should exclude domain 1 from results";
 }
@@ -234,7 +234,7 @@ if ($test2_t1_good_checksum != `CHECKSUM TABLE t1`)
 {
     die $data_inconsistent_err;
 }
-if (0 < `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
+if (`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
 {
     die "t2 should not exist as binlog replay should exclude domain 1 from results";
 }
@@ -276,7 +276,7 @@ if ($test2_t1_good_checksum != `CHECKSUM TABLE t1`)
 {
     die $data_inconsistent_err;
 }
-if (0 < `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
+if (`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
 {
     die "t2 should not exist as binlog replay should exclude domain 1 from results";
 }
@@ -295,7 +295,7 @@ if ($test2_t1_good_checksum != `CHECKSUM TABLE t1`)
 {
     die $data_inconsistent_err;
 }
-if (0 < `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
+if (`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
 {
     die "t2 should not exist as binlog replay should exclude domain 1 from results";
 }
@@ -309,7 +309,7 @@ if ($test2_t1_good_checksum != `CHECKSUM TABLE t1`)
 {
     die $data_inconsistent_err;
 }
-if (0 < `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
+if (`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 't2'`)
 {
     die "t2 should not exist as binlog replay should exclude domain 1 from results";
 }
