@@ -639,11 +639,13 @@ struct ilink
   }
   inline void assert_linked()
   {
-    DBUG_ASSERT(prev != 0 && next != 0);
+    DBUG_ASSERT(prev != 0);
+    DBUG_ASSERT(next != 0);
   }
   inline void assert_not_linked()
   {
-    DBUG_ASSERT(prev == 0 && next == 0);
+    DBUG_ASSERT(prev == 0);
+    DBUG_ASSERT(next == 0);
   }
   virtual ~ilink() { unlink(); }		/*lint -e1740 */
 };
