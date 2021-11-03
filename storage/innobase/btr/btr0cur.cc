@@ -224,6 +224,11 @@ btr_cur_latch_leaves(
 
 	spatial = dict_index_is_spatial(cursor->index) && cursor->rtr_info;
 	ut_ad(block->page.in_file());
+	ut_ad(srv_read_only_mode
+	      || mtr->memo_contains_flagged(&cursor->index->lock,
+					    MTR_MEMO_S_LOCK
+					    | MTR_MEMO_X_LOCK
+					    | MTR_MEMO_SX_LOCK));
 
 	switch (latch_mode) {
 	case BTR_SEARCH_LEAF:
@@ -331,12 +336,10 @@ btr_cur_latch_leaves(
 	case BTR_SEARCH_PREV:
 	case BTR_MODIFY_PREV:
 		mode = latch_mode == BTR_SEARCH_PREV ? RW_S_LATCH : RW_X_LATCH;
-		/* latch also left sibling */
-		{
-			transactional_shared_lock_guard<block_lock> g{
-				block->page.lock};
-			left_page_no = btr_page_get_prev(block->page.frame);
-		}
+		/* Because we are holding index->lock, no page splits
+		or merges may run concurrently, and we may read
+		FIL_PAGE_PREV from a buffer-fixed, unlatched page. */
+		left_page_no = btr_page_get_prev(block->page.frame);
 
 		if (left_page_no != FIL_NULL) {
 			latch_leaves.savepoints[0] = mtr_set_savepoint(mtr);
@@ -750,6 +753,7 @@ bool btr_cur_instant_root_init(dict_index_t* index, const page_t* page)
 @param[in,out]	cursor		cursor
 @param[in]	mtr		mini-transaction
 @return true if success */
+TRANSACTIONAL_TARGET
 bool
 btr_cur_optimistic_latch_leaves(
 	buf_block_t*	block,
@@ -1271,7 +1275,6 @@ btr_cur_search_to_nth_level_func(
 	ulint		n_releases = 0;
 	bool		detected_same_key_root = false;
 
-	bool		retrying_for_search_prev = false;
 	ulint		leftmost_from_level = 0;
 	buf_block_t**	prev_tree_blocks = NULL;
 	ulint*		prev_tree_savepoints = NULL;
@@ -1494,9 +1497,6 @@ x_latch_index:
 	default:
 		if (!srv_read_only_mode) {
 			if (s_latch_by_caller) {
-				ut_ad(mtr->memo_contains_flagged(
-					      &index->lock, MTR_MEMO_S_LOCK
-					      | MTR_MEMO_SX_LOCK));
 			} else if (!modify_external) {
 				/* BTR_SEARCH_TREE is intended to be used with
 				BTR_ALREADY_S_LATCHED */
@@ -1568,7 +1568,7 @@ search_loop:
 	if (height != 0) {
 		/* We are about to fetch the root or a non-leaf page. */
 		if ((latch_mode != BTR_MODIFY_TREE || height == level)
-		    && !retrying_for_search_prev) {
+		    && !prev_tree_blocks) {
 			/* If doesn't have SX or X latch of index,
 			each pages should be latched before reading. */
 			if (height == ULINT_UNDEFINED
@@ -1698,20 +1698,18 @@ retry_page_get:
 		goto retry_page_get;
 	}
 
-	if (retrying_for_search_prev && height != 0) {
+	if (height && prev_tree_blocks) {
 		/* also latch left sibling */
-		uint32_t	left_page_no;
 		buf_block_t*	get_block;
 
 		ut_ad(rw_latch == RW_NO_LATCH);
 
 		rw_latch = upper_rw_latch;
 
-		{
-			transactional_shared_lock_guard<block_lock> g{
-				block->page.lock};
-			left_page_no = btr_page_get_prev(block->page.frame);
-		}
+		/* Because we are holding index->lock, no page splits
+		or merges may run concurrently, and we may read
+		FIL_PAGE_PREV from a buffer-fixed, unlatched page. */
+		uint32_t left_page_no = btr_page_get_prev(block->page.frame);
 
 		if (left_page_no != FIL_NULL) {
 			ut_ad(prev_n_blocks < leftmost_from_level);
@@ -1854,7 +1852,7 @@ retry_page_get:
 			}
 
 			/* release upper blocks */
-			if (retrying_for_search_prev) {
+			if (prev_tree_blocks) {
 				ut_ad(!autoinc);
 				for (;
 				     prev_n_releases < prev_n_blocks;
@@ -2240,7 +2238,7 @@ need_opposite_intention:
 		BTR_MODIFY_PREV latches prev_page of the leaf page. */
 		if ((latch_mode == BTR_SEARCH_PREV
 		     || latch_mode == BTR_MODIFY_PREV)
-		    && !retrying_for_search_prev) {
+		    && !prev_tree_blocks) {
 			/* block should be latched for consistent
 			   btr_page_get_prev() */
 			ut_ad(mtr->memo_contains_flagged(
@@ -2260,8 +2258,6 @@ need_opposite_intention:
 			if (height == 0 && leftmost_from_level > 0) {
 				/* should retry to get also prev_page
 				from level==leftmost_from_level. */
-				retrying_for_search_prev = true;
-
 				prev_tree_blocks = static_cast<buf_block_t**>(
 					ut_malloc_nokey(sizeof(buf_block_t*)
 							* leftmost_from_level));
@@ -2483,10 +2479,8 @@ func_exit:
 		mem_heap_free(heap);
 	}
 
-	if (retrying_for_search_prev) {
-		ut_free(prev_tree_blocks);
-		ut_free(prev_tree_savepoints);
-	}
+	ut_free(prev_tree_blocks);
+	ut_free(prev_tree_savepoints);
 
 	if (mbr_adj) {
 		/* remember that we will need to adjust parent MBR */
