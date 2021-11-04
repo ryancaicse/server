@@ -77,13 +77,13 @@ extern my_bool	buf_disable_resize_buffer_pool_debug; /*!< if TRUE, resizing
 enum buf_page_state
 {
   /** available in buf_pool.free or buf_pool.watch */
-  BUF_BLOCK_NOT_USED,
+  BUF_BLOCK_NOT_USED= 0U << 28,
   /** allocated for something else than a file page */
-  BUF_BLOCK_MEMORY,
+  BUF_BLOCK_MEMORY= 1U << 28,
   /** a previously allocated file page, in transit to NOT_USED */
-  BUF_BLOCK_REMOVE_HASH,
+  BUF_BLOCK_REMOVE_HASH= 2U << 28,
   /** a buf_block_t that is also in buf_pool.LRU */
-  BUF_BLOCK_LRU
+  BUF_BLOCK_LRU= 3U << 28
 };
 
 /** This structure defines information we will fetch from each buffer pool. It
@@ -593,13 +593,6 @@ private:
   (because id().space() is the temporary tablespace). */
   Atomic_relaxed<lsn_t> oldest_modification_;
 
-  /** Block state.
-  State transitions to
-  BUF_BLOCK_REMOVE_HASH are protected by buf_pool.page_hash.lock_get()
-  when the block is in buf_pool.page_hash.
-  Other transitions when in_LRU_list are protected by buf_pool.mutex. */
-  buf_page_state state_;
-
 public:
   /** read-fix flag in fix_count_raw() */
   static constexpr uint32_t READ_FIX= 1U << 30;
@@ -699,7 +692,6 @@ public:
   buf_page_t(const buf_page_t &b) :
     id_(b.id_), buf_fix_count_(b.buf_fix_count_),
     oldest_modification_(b.oldest_modification_),
-    state_(b.state_),
     lock() /* not copied */,
     frame(b.frame), hash(b.hash), zip(b.zip),
 #ifdef UNIV_DEBUG
@@ -713,9 +705,18 @@ public:
   }
 
   /** Initialize some fields */
-  void init()
+  void init(uint buf_fix_count= 0)
   {
-    buf_fix_count_= 0;
+  }
+
+  /** Initialize some more fields */
+  void init(uint32_t buf_fix_count, page_id_t id)
+  {
+    ut_ad(buf_fix_count == BUF_BLOCK_NOT_USED ||
+          buf_fix_count == BUF_BLOCK_MEMORY ||
+          (~IO_FIX & buf_fix_count) >= BUF_BLOCK_LRU);
+    id_= id;
+    buf_fix_count_= buf_fix_count;
     oldest_modification_= 0;
     lock.init();
     ut_d(in_zip_hash= false);
@@ -729,29 +730,13 @@ public:
     status= NORMAL;
   }
 
-  /** Initialize some more fields */
-  void init(buf_page_state state, page_id_t id, uint32_t buf_fix_count= 0)
-  {
-    init();
-    state_= state;
-    id_= id;
-    buf_fix_count_= buf_fix_count;
-  }
-
-  /** Initialize some more fields */
-  void init(page_id_t id, uint32_t buf_fix_count= 0)
-  {
-    init();
-    id_= id;
-    buf_fix_count_= buf_fix_count;
-    hash= nullptr;
-  }
-
 public:
   const page_id_t &id() const { return id_; }
-  buf_page_state state() const { return state_; }
-  uint32_t fix_count_raw() const { return buf_fix_count_; }
-  uint32_t buf_fix_count() const { return buf_fix_count_ & ~IO_FIX; }
+  buf_page_state state() const
+  { return buf_page_state(buf_fix_count_ & BUF_BLOCK_LRU); }
+  uint32_t raw_fix_count() const { return buf_fix_count_; }
+  uint32_t buf_fix_count() const
+  { return buf_fix_count_ & ~(IO_FIX | BUF_BLOCK_LRU); }
   bool is_write_fixed() const { return buf_fix_count_ & WRITE_FIX; }
   bool is_read_fixed() const { return buf_fix_count_ & READ_FIX; }
   uint32_t io_fix() const { return buf_fix_count_ >> 30; }
@@ -762,7 +747,6 @@ public:
 
   inline void add_buf_fix_count(uint32_t count);
   inline void set_buf_fix_count(uint32_t count);
-  inline void set_state(buf_page_state state);
   inline void set_corrupt_id();
 
   /** @return the log sequence number of the oldest pending modification
@@ -818,11 +802,11 @@ public:
   /** Prepare to release a file page to buf_pool.free. */
   void free_file_page()
   {
-    ut_ad(state() == BUF_BLOCK_REMOVE_HASH);
+    ut_d(auto f=) buf_fix_count_-= (BUF_BLOCK_REMOVE_HASH - BUF_BLOCK_MEMORY);
+    ut_ad(f == BUF_BLOCK_MEMORY);
     /* buf_LRU_block_free_non_file_page() asserts !oldest_modification() */
     ut_d(oldest_modification_= 0;)
-    set_corrupt_id();
-    ut_d(set_state(BUF_BLOCK_MEMORY));
+    id_= page_id_t(~0ULL);
   }
 
   void fix() { buf_fix_count_++; }
@@ -855,7 +839,7 @@ public:
   }
 
   /** @return whether the block is mapped to a data file */
-  bool in_file() const { return state_ == BUF_BLOCK_LRU; }
+  bool in_file() const { return state() == BUF_BLOCK_LRU; }
 
   /** @return whether the block is modified and ready for flushing */
   inline bool ready_for_flush() const;
@@ -1020,8 +1004,8 @@ struct buf_block_t{
   /** Initialize the block.
   @param page_id  page identifier
   @param zip_size ROW_FORMAT=COMPRESSED page size, or 0
-  @param fix      initial buf_fix_count() */
-  void initialise(const page_id_t page_id, ulint zip_size, uint32_t fix= 0);
+  @param fix      initial raw_fix_count() */
+  void initialise(const page_id_t page_id, ulint zip_size, uint32_t fix);
 };
 
 /**********************************************************************//**
@@ -1963,17 +1947,6 @@ inline void buf_page_t::set_buf_fix_count(uint32_t count)
   buf_fix_count_= count;
 }
 
-inline void buf_page_t::set_state(buf_page_state state)
-{
-  mysql_mutex_assert_owner(&buf_pool.mutex);
-  ut_ad(state != BUF_BLOCK_LRU ||
-        (this >= &buf_pool.watch[0] &&
-         this <= &buf_pool.watch[array_elements(buf_pool.watch)]) ||
-        buf_pool.page_hash.lock_get(buf_pool.page_hash.cell_get(id_.fold())).
-        is_write_locked());
-  state_= state;
-}
-
 inline void buf_page_t::set_corrupt_id()
 {
 #ifdef UNIV_DEBUG
@@ -2016,8 +1989,7 @@ inline void buf_page_t::set_oldest_modification(lsn_t lsn)
 inline void buf_page_t::clear_oldest_modification()
 {
   mysql_mutex_assert_owner(&buf_pool.flush_list_mutex);
-  ut_d(const auto state= state_);
-  ut_ad(state == BUF_BLOCK_LRU || state == BUF_BLOCK_REMOVE_HASH);
+  ut_ad((state() & BUF_BLOCK_LRU) >= BUF_BLOCK_REMOVE_HASH);
   ut_ad(oldest_modification());
   ut_ad(!list.prev);
   ut_ad(!list.next);
@@ -2032,9 +2004,10 @@ inline bool buf_page_t::ready_for_flush() const
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(in_LRU_list);
-  ut_a(in_file());
+  auto f= buf_fix_count_;
+  ut_a(!(~f & BUF_BLOCK_LRU));
   ut_ad(!fsp_is_system_temporary(id().space()) || oldest_modification() == 2);
-  return !io_fix();
+  return !(f & IO_FIX);
 }
 
 /** @return whether the block can be relocated in memory.
@@ -2044,7 +2017,7 @@ inline bool buf_page_t::can_relocate() const
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(in_file());
   ut_ad(in_LRU_list);
-  return !buf_fix_count_;
+  return buf_fix_count_ == BUF_BLOCK_LRU;
 }
 
 /** @return whether the block has been flagged old in buf_pool.LRU */

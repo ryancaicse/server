@@ -354,14 +354,15 @@ buf_buddy_block_free(void* buf)
 	ut_a(!ut_align_offset(buf, srv_page_size));
 
 	HASH_SEARCH(hash, &buf_pool.zip_hash, fold, buf_page_t*, bpage,
-		    ut_ad(bpage->state() == BUF_BLOCK_MEMORY
+		    ut_ad(bpage->raw_fix_count() == BUF_BLOCK_MEMORY
 			  && bpage->in_zip_hash),
 		    bpage->frame == buf);
 	ut_a(bpage);
-	ut_a(bpage->state() == BUF_BLOCK_MEMORY);
+	ut_a(bpage->raw_fix_count() == BUF_BLOCK_MEMORY);
 	ut_ad(bpage->in_zip_hash);
 	ut_d(bpage->in_zip_hash = false);
 	HASH_DELETE(buf_page_t, hash, &buf_pool.zip_hash, fold, bpage);
+	bpage->hash = nullptr;
 
 	ut_d(memset(buf, 0, srv_page_size));
 	MEM_UNDEFINED(buf, srv_page_size);

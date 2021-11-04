@@ -1097,7 +1097,7 @@ inline const buf_block_t *buf_pool_t::chunk_t::not_freed() const
         can be dirtied, so all of them must be clean. */
         ut_ad(lsn == 0 || lsn == recv_sys.recovered_lsn ||
               srv_force_recovery == SRV_FORCE_NO_LOG_REDO);
-        ut_ad(!block->page.fix_count_raw());
+        ut_ad(block->page.raw_fix_count() == BUF_BLOCK_LRU);
         break;
       }
 
@@ -1386,7 +1386,7 @@ inline bool buf_pool_t::realloc(buf_block_t *block)
 		memset_aligned<2>(block->page.frame
 				  + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID, 0xff, 4);
 		MEM_UNDEFINED(block->page.frame, srv_page_size);
-		block->page.set_state(BUF_BLOCK_REMOVE_HASH);
+		block->page.set_buf_fix_count(BUF_BLOCK_REMOVE_HASH);
 		if (!fsp_is_system_temporary(id.space())) {
 			buf_flush_relocate_on_flush_list(&block->page,
 							 &new_block->page);
@@ -1407,7 +1407,7 @@ inline bool buf_pool_t::realloc(buf_block_t *block)
 		new_block->n_fields	= 1;
 		new_block->left_side	= TRUE;
 #endif /* BTR_CUR_HASH_ADAPT */
-		ut_d(block->page.set_state(BUF_BLOCK_MEMORY));
+		ut_d(block->page.set_buf_fix_count(BUF_BLOCK_MEMORY));
 		/* free block */
 		new_block = block;
 	}
@@ -2034,13 +2034,12 @@ static void buf_relocate(buf_page_t *bpage, buf_page_t *dpage)
 {
   const page_id_t id= bpage->id();
   buf_pool_t::hash_chain &chain= buf_pool.page_hash.cell_get(id.fold());
-  ut_ad(bpage->in_file());
   ut_ad(!bpage->frame);
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(buf_pool.page_hash.lock_get(chain).is_write_locked());
-  ut_a(!bpage->fix_count_raw());
   ut_ad(bpage == buf_pool.page_hash.get(id, chain));
   ut_ad(!buf_pool.watch_is_sentinel(*bpage));
+  ut_a(bpage->raw_fix_count() == BUF_BLOCK_LRU + 1);
   const auto frame= dpage->frame;
 
   new (dpage) buf_page_t(*bpage);
@@ -2116,29 +2115,30 @@ retry:
     ut_ad(!w->oldest_modification());
     ut_ad(!w->zip.data);
     ut_ad(!w->in_zip_hash);
-    if (w->state() == BUF_BLOCK_LRU)
+    static_assert(BUF_BLOCK_NOT_USED == 0, "efficiency");
+    if (ut_d(auto f=) w->buf_fix_count_)
+    {
       /* This watch may be in use for some other page. */
+      ut_ad(!(~f & BUF_BLOCK_LRU));
       continue;
-    ut_ad(w->state() == BUF_BLOCK_NOT_USED);
-    ut_ad(!w->buf_fix_count());
+    }
     /* w is pointing to watch[], which is protected by mutex.
     Normally, buf_page_t::id for objects that are reachable by
     page_hash.get(id, chain) are protected by hash_lock. */
-    w->set_state(BUF_BLOCK_LRU);
+    w->buf_fix_count_= BUF_BLOCK_LRU + 1;
     w->id_= id;
 
     buf_page_t *bpage= page_hash.get(id, chain);
     if (UNIV_LIKELY_NULL(bpage))
     {
-      w->set_state(BUF_BLOCK_NOT_USED);
+      w->set_buf_fix_count(BUF_BLOCK_NOT_USED);
       page_hash.lock_get(chain).lock();
       mysql_mutex_unlock(&mutex);
       goto retry;
     }
 
     page_hash.lock_get(chain).lock();
-    ut_ad(!w->buf_fix_count_);
-    w->buf_fix_count_= 1;
+    ut_ad(w->buf_fix_count_ == BUF_BLOCK_LRU + 1);
     buf_pool.page_hash.append(chain, w);
     mysql_mutex_unlock(&mutex);
     return nullptr;
@@ -2183,16 +2183,18 @@ void buf_pool_t::watch_unset(const page_id_t id, buf_pool_t::hash_chain &chain)
   {
     transactional_lock_guard<page_hash_latch> g
       {buf_pool.page_hash.lock_get(chain)};
-    if (w->unfix() == 0 && w == old)
+    auto f= --w->buf_fix_count_;
+    ut_ad(f >= BUF_BLOCK_LRU);
+    ut_ad(f < BUF_BLOCK_LRU + buf_page_t::READ_FIX);
+
+    if (f == BUF_BLOCK_LRU && w == old)
     {
       page_hash.remove(chain, w);
       // Now that w is detached from page_hash, release it to watch[].
       ut_ad(w->id_ == id);
-      ut_ad(!w->buf_fix_count());
-      ut_ad(w->state() == BUF_BLOCK_LRU);
       ut_ad(!w->frame);
       ut_ad(!w->zip.data);
-      w->set_state(BUF_BLOCK_NOT_USED);
+      w->buf_fix_count_= BUF_BLOCK_NOT_USED;
     }
   }
 
@@ -2707,8 +2709,7 @@ retry_page_zip:
 		ut_ad(&block->page == buf_pool.page_hash.get(page_id, chain));
 		block->page.lock.x_unlock();
 
-		/* hash_lock protects us after unfixing */
-		if (block->unfix()) {
+		if (block->page.raw_fix_count() != BUF_BLOCK_LRU + 1) {
 			/* The block was buffer-fixed while
 			buf_pool.mutex was not held by this thread.
 			Free the block that was allocated and retry.
@@ -2720,6 +2721,7 @@ retry_page_zip:
 			mysql_mutex_unlock(&buf_pool.mutex);
 
 			/* Try again */
+			block->page.unfix();
 			goto loop;
 		}
 
@@ -2732,16 +2734,12 @@ retry_page_zip:
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		buf_relocate(&block->page, &new_block->page);
 
-		/* Buffer-fix and X-latch the block
-		for the duration of the decompression. */
-		new_block->page.set_buf_fix_count(1);
+		/* X-latch the block for the duration of the decompression. */
 		new_block->page.lock.x_lock();
 
 		buf_flush_relocate_on_flush_list(&block->page,
 						 &new_block->page);
 		mysql_mutex_unlock(&buf_pool.flush_list_mutex);
-
-		new_block->page.set_state(BUF_BLOCK_LRU);
 
 		/* Insert at the front of unzip_LRU list */
 		buf_unzip_LRU_add_block(new_block, FALSE);
@@ -3104,7 +3102,7 @@ void buf_block_t::initialise(const page_id_t page_id, ulint zip_size,
 {
   ut_ad(!page.in_file());
   buf_block_init_low(this);
-  page.init(page_id, fix);
+  page.init(fix, page_id);
   page_zip_set_size(&page.zip, zip_size);
 }
 
@@ -3115,7 +3113,7 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
   ut_ad(mtr->is_active());
   ut_ad(page_id.space() != 0 || !zip_size);
 
-  free_block->initialise(page_id, zip_size, 1);
+  free_block->initialise(page_id, zip_size, BUF_BLOCK_MEMORY);
 
   buf_pool_t::hash_chain &chain= buf_pool.page_hash.cell_get(page_id.fold());
   mysql_mutex_lock(&buf_pool.mutex);
@@ -3152,16 +3150,12 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
         too large. */
         hash_lock.lock();
         bpage->lock.x_unlock();
-        ut_d(const auto f=) bpage->unfix();
-        ut_ad(f < buf_page_t::READ_FIX);
 
         mysql_mutex_lock(&buf_pool.flush_list_mutex);
         buf_relocate(bpage, &free_block->page);
         buf_flush_relocate_on_flush_list(bpage, &free_block->page);
         mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
-        free_block->page.fix();
-        free_block->page.set_state(BUF_BLOCK_LRU);
         free_block->page.lock.x_lock();
         buf_unzip_LRU_add_block(free_block, FALSE);
         hash_lock.unlock();
@@ -3204,7 +3198,7 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
 
   bpage= &free_block->page;
 
-  ut_ad(bpage->buf_fix_count() == 1);
+  ut_ad(bpage->raw_fix_count() == BUF_BLOCK_MEMORY);
   bpage->lock.x_lock();
 
   /* The block must be put to the LRU list */
@@ -3212,7 +3206,7 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
   {
     transactional_lock_guard<page_hash_latch> g
       {buf_pool.page_hash.lock_get(chain)};
-    bpage->set_state(BUF_BLOCK_LRU);
+    bpage->set_buf_fix_count(BUF_BLOCK_LRU + 1);
     buf_pool.page_hash.append(chain, bpage);
   }
 
@@ -3728,12 +3722,10 @@ void buf_pool_t::validate()
 	/* Check the uncompressed blocks. */
 
 	for (auto i = n_chunks; i--; chunk++) {
-
-		ulint		j;
 		buf_block_t*	block = chunk->blocks;
 
-		for (j = chunk->size; j--; block++) {
-			switch (block->page.state()) {
+		for (auto j = chunk->size; j--; block++) {
+			switch (const auto f = block->page.raw_fix_count()) {
 			case BUF_BLOCK_NOT_USED:
 				n_free++;
 				break;
@@ -3743,14 +3735,18 @@ void buf_pool_t::validate()
 				/* do nothing */
 				break;
 
-			case BUF_BLOCK_LRU:
+			default:
+				ut_ad(!(~f & BUF_BLOCK_LRU));
 				ut_ad(block->page.frame);
-				const page_id_t id = block->page.id();
-				ut_ad(page_hash.get(id, page_hash.cell_get(
-							    id.fold()))
-				      == &block->page);
+				const page_id_t id{block->page.id()};
+				if (page_hash.get(
+					    id, page_hash.cell_get(id.fold()))
+				    != &block->page) {
+					ut_ad(f == (buf_page_t::READ_FIX
+						    | BUF_BLOCK_LRU));
+					break;
+				}
 				n_lru++;
-				break;
 			}
 		}
 	}
@@ -3919,8 +3915,10 @@ ulint buf_get_latched_pages_number()
 
   for (buf_page_t *b= UT_LIST_GET_FIRST(buf_pool.LRU); b;
        b= UT_LIST_GET_NEXT(LRU, b))
-    if (b->in_file() && b->fix_count_raw())
+    if (b->raw_fix_count() > BUF_BLOCK_LRU)
       fixed_pages_number++;
+
+  static_assert(BUF_BLOCK_LRU == 3U << 28, "compatibility");
 
   mysql_mutex_unlock(&buf_pool.mutex);
 

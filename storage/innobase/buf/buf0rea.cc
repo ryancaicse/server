@@ -59,12 +59,9 @@ inline void buf_pool_t::watch_remove(buf_page_t *watch,
   ut_ad(page_hash.lock_get(chain).is_write_locked());
   ut_a(watch_is_sentinel(*watch));
   if (watch->buf_fix_count())
-  {
     page_hash.remove(chain, watch);
-    watch->set_buf_fix_count(0);
-  }
   ut_ad(!watch->in_page_hash);
-  watch->set_state(BUF_BLOCK_NOT_USED);
+  watch->set_buf_fix_count(BUF_BLOCK_NOT_USED);
   watch->id_= page_id_t(~0ULL);
 }
 
@@ -109,7 +106,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
   if (!zip_size || unzip || recv_recovery_is_on())
   {
     block= buf_LRU_get_free_block(false);
-    block->initialise(page_id, zip_size);
+    block->initialise(page_id, zip_size, BUF_BLOCK_LRU | buf_page_t::READ_FIX);
     /* x_unlock() will be invoked
     in buf_page_t::read_complete() by the io-handler thread. */
     block->page.lock.x_lock(true);
@@ -126,6 +123,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     if (block)
     {
       block->page.lock.x_unlock(true);
+      ut_d(block->page.set_buf_fix_count(BUF_BLOCK_MEMORY));
       buf_LRU_block_free_non_file_page(block);
     }
     goto func_exit;
@@ -137,21 +135,19 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
 
     /* Insert into the hash table of file pages */
     {
-      uint32_t buf_fix_count= 0;
       transactional_lock_guard<page_hash_latch> g
         {buf_pool.page_hash.lock_get(chain)};
 
       if (hash_page)
       {
         /* Preserve the reference count. */
-        buf_fix_count= hash_page->fix_count_raw();
-        ut_a(buf_fix_count > 0);
+        uint32_t buf_fix_count= hash_page->raw_fix_count() - BUF_BLOCK_LRU;
+        ut_a(buf_fix_count);
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
         buf_pool.watch_remove(hash_page, chain);
+        block->page.add_buf_fix_count(buf_fix_count - BUF_BLOCK_LRU);
       }
 
-      block->page.add_buf_fix_count(buf_fix_count | buf_page_t::READ_FIX);
-      block->page.set_state(BUF_BLOCK_LRU);
       buf_pool.page_hash.append(chain, &block->page);
     }
 
@@ -205,11 +201,10 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     page_zip_set_size(&bpage->zip, zip_size);
     bpage->zip.data = (page_zip_t*) data;
 
-    bpage->init(BUF_BLOCK_LRU, page_id);
+    bpage->init(BUF_BLOCK_LRU | buf_page_t::READ_FIX, page_id);
     bpage->lock.x_lock(true);
 
     {
-      uint32_t buf_fix_count= 0;
       transactional_lock_guard<page_hash_latch> g
         {buf_pool.page_hash.lock_get(chain)};
 
@@ -218,12 +213,12 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
         /* Preserve the reference count. It can be 0 if
         buf_pool_t::watch_unset() is executing concurrently,
         waiting for buf_pool.mutex, which we are holding. */
-        buf_fix_count= hash_page->buf_fix_count();
+        uint32_t buf_fix_count= hash_page->raw_fix_count() - BUF_BLOCK_LRU;
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
+        bpage->add_buf_fix_count(buf_fix_count - BUF_BLOCK_LRU);
         buf_pool.watch_remove(hash_page, chain);
       }
 
-      bpage->add_buf_fix_count(buf_fix_count | buf_page_t::READ_FIX);
       buf_pool.page_hash.append(chain, bpage);
     }
 
