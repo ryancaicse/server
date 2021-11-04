@@ -714,7 +714,7 @@ not_free:
 #endif
         block->page.lock.x_lock();
         mysql_mutex_lock(&buf_pool.flush_list_mutex);
-        ut_ad(bpage->io_fix() == BUF_IO_NONE);
+        ut_ad(!bpage->io_fix());
 
         if (bpage->oldest_modification() > 1)
         {

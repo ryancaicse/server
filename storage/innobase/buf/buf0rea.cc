@@ -111,7 +111,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     block= buf_LRU_get_free_block(false);
     block->initialise(page_id, zip_size);
     /* x_unlock() will be invoked
-    in buf_page_read_complete() by the io-handler thread. */
+    in buf_page_t::read_complete() by the io-handler thread. */
     block->page.lock.x_lock(true);
   }
 
@@ -137,19 +137,20 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
 
     /* Insert into the hash table of file pages */
     {
+      uint32_t buf_fix_count= 0;
       transactional_lock_guard<page_hash_latch> g
         {buf_pool.page_hash.lock_get(chain)};
 
       if (hash_page)
       {
         /* Preserve the reference count. */
-        auto buf_fix_count= hash_page->buf_fix_count();
+        buf_fix_count= hash_page->fix_count_raw();
         ut_a(buf_fix_count > 0);
-        block->page.add_buf_fix_count(buf_fix_count);
+        ut_a(buf_fix_count < buf_page_t::READ_FIX);
         buf_pool.watch_remove(hash_page, chain);
       }
 
-      block->page.set_io_fix(BUF_IO_READ);
+      block->page.add_buf_fix_count(buf_fix_count | buf_page_t::READ_FIX);
       block->page.set_state(BUF_BLOCK_LRU);
       buf_pool.page_hash.append(chain, &block->page);
     }
@@ -208,6 +209,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     bpage->lock.x_lock(true);
 
     {
+      uint32_t buf_fix_count= 0;
       transactional_lock_guard<page_hash_latch> g
         {buf_pool.page_hash.lock_get(chain)};
 
@@ -216,12 +218,13 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
         /* Preserve the reference count. It can be 0 if
         buf_pool_t::watch_unset() is executing concurrently,
         waiting for buf_pool.mutex, which we are holding. */
-        bpage->add_buf_fix_count(hash_page->buf_fix_count());
+        buf_fix_count= hash_page->buf_fix_count();
+        ut_a(buf_fix_count < buf_page_t::READ_FIX);
         buf_pool.watch_remove(hash_page, chain);
       }
 
+      bpage->add_buf_fix_count(buf_fix_count | buf_page_t::READ_FIX);
       buf_pool.page_hash.append(chain, bpage);
-      bpage->set_io_fix(BUF_IO_READ);
     }
 
     /* The block must be put to the LRU list, to the old blocks.
@@ -339,7 +342,7 @@ nothing_read:
 		thd_wait_end(NULL);
 
 		/* The i/o was already completed in space->io() */
-		*err = buf_page_read_complete(bpage, *fio.node);
+		*err = bpage->read_complete(*fio.node);
 		space->release();
 
 		if (*err != DB_SUCCESS) {

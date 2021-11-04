@@ -2923,7 +2923,7 @@ write_completed:
     files and never issue asynchronous reads of change buffer pages. */
     const page_id_t id(request.bpage->id());
 
-    if (dberr_t err= buf_page_read_complete(request.bpage, *request.node))
+    if (dberr_t err= request.bpage->read_complete(*request.node))
     {
       if (recv_recovery_is_on() && !srv_force_recovery)
       {

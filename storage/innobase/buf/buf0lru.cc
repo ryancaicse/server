@@ -1075,12 +1075,8 @@ static bool buf_LRU_block_remove_hashed(buf_page_t *bpage, const page_id_t id,
                                         buf_pool_t::hash_chain &chain,
                                         bool zip)
 {
-	mysql_mutex_assert_owner(&buf_pool.mutex);
+	ut_a(bpage->can_relocate());
 	ut_ad(buf_pool.page_hash.lock_get(chain).is_write_locked());
-
-	ut_a(bpage->io_fix() == BUF_IO_NONE);
-	ut_a(!bpage->buf_fix_count());
-	ut_ad(bpage->in_file());
 
 	buf_LRU_remove_block(bpage);
 
@@ -1229,23 +1225,25 @@ evict_zip:
 @param bpage    page that was being read */
 ATTRIBUTE_COLD void buf_pool_t::corrupted_evict(buf_page_t *bpage)
 {
-  const page_id_t id(bpage->id());
+  const page_id_t id{bpage->id()};
   buf_pool_t::hash_chain &chain= buf_pool.page_hash.cell_get(id.fold());
   page_hash_latch &hash_lock= buf_pool.page_hash.lock_get(chain);
 
   mysql_mutex_lock(&mutex);
   hash_lock.lock();
 
-  ut_ad(bpage->io_fix() == BUF_IO_READ);
   ut_ad(!bpage->oldest_modification());
   bpage->set_corrupt_id();
-  bpage->io_unfix();
   bpage->lock.x_unlock(true);
 
-  while (bpage->buf_fix_count())
+  for (auto f= bpage->buf_fix_count_-= buf_page_t::READ_FIX; f;
+       f= bpage->buf_fix_count_)
+  {
+    ut_ad(f < buf_page_t::READ_FIX);
     /* Wait for other threads to release the fix count
     before releasing the bpage from LRU list. */
     (void) LF_BACKOFF();
+  }
 
   /* remove from LRU and page_hash */
   if (buf_LRU_block_remove_hashed(bpage, id, chain, true))
@@ -1430,12 +1428,8 @@ void buf_LRU_print()
 			fputs("old ", stderr);
 		}
 
-		if (const uint32_t buf_fix_count = bpage->buf_fix_count()) {
-			fprintf(stderr, "buffix count %u ", buf_fix_count);
-		}
-
-		if (const auto io_fix = bpage->io_fix()) {
-			fprintf(stderr, "io_fix %d ", io_fix);
+		if (const uint32_t f = bpage->fix_count_raw()) {
+			fprintf(stderr, "fix %u ", f);
 		}
 
 		if (bpage->oldest_modification()) {

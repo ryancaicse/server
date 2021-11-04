@@ -484,7 +484,7 @@ struct Shrink
     case MTR_MEMO_PAGE_X_FIX:
     case MTR_MEMO_PAGE_SX_FIX:
       auto &bpage= static_cast<buf_block_t*>(slot->object)->page;
-      ut_ad(bpage.io_fix() == BUF_IO_NONE);
+      ut_ad(!bpage.io_fix());
       const auto id= bpage.id();
       if (id < high)
       {

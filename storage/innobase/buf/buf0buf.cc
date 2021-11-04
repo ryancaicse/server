@@ -340,11 +340,8 @@ static Atomic_counter<size_t> buf_dbg_counter;
 
 /** Macro to determine whether the read of write counter is used depending
 on the io_type */
-#define MONITOR_RW_COUNTER(io_type, counter)		\
-	((io_type == BUF_IO_READ)			\
-	 ? (counter##_READ)				\
-	 : (counter##_WRITTEN))
-
+#define MONITOR_RW_COUNTER(read, counter)		\
+	(read ? (counter##_READ) : (counter##_WRITTEN))
 
 /** Decrypt a page for temporary tablespace.
 @param[in,out]	tmp_frame	Temporary buffer
@@ -1100,8 +1097,7 @@ inline const buf_block_t *buf_pool_t::chunk_t::not_freed() const
         can be dirtied, so all of them must be clean. */
         ut_ad(lsn == 0 || lsn == recv_sys.recovered_lsn ||
               srv_force_recovery == SRV_FORCE_NO_LOG_REDO);
-        ut_ad(!block->page.buf_fix_count());
-        ut_ad(block->page.io_fix() == BUF_IO_NONE);
+        ut_ad(!block->page.fix_count_raw());
         break;
       }
 
@@ -2042,8 +2038,7 @@ static void buf_relocate(buf_page_t *bpage, buf_page_t *dpage)
   ut_ad(!bpage->frame);
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(buf_pool.page_hash.lock_get(chain).is_write_locked());
-  ut_a(bpage->io_fix() == BUF_IO_NONE);
-  ut_a(!bpage->buf_fix_count());
+  ut_a(!bpage->fix_count_raw());
   ut_ad(bpage == buf_pool.page_hash.get(id, chain));
   ut_ad(!buf_pool.watch_is_sentinel(*bpage));
   const auto frame= dpage->frame;
@@ -2303,7 +2298,6 @@ lookup:
   ut_ad(bpage->buf_fix_count());
   ut_ad(bpage->in_file());
   bpage->lock.s_lock();
-  ut_ad(bpage->io_fix() != BUF_IO_READ);
   return bpage;
 
 must_read_page:
@@ -2566,7 +2560,7 @@ loop:
 
 	/* The call path is buf_read_page() ->
 	buf_read_page_low() (fil_space_t::io()) ->
-	buf_page_read_complete() ->
+	buf_page_t::read_complete() ->
 	buf_decrypt_after_read(). Here fil_space_t* is used
 	and we decrypt -> buf_page_check_corrupt() where page
 	checksums are compared. Decryption, decompression as
@@ -2643,27 +2637,34 @@ loop:
 
 got_block:
 	ut_ad(!block->page.in_zip_hash);
+	ut_ad(block->page.in_file());
+
 	switch (mode) {
 	default:
 		ut_ad(block->zip_size() == zip_size);
 		break;
-	case BUF_GET_IF_IN_POOL:
 	case BUF_PEEK_IF_IN_POOL:
-	case BUF_EVICT_IF_IN_POOL:
-		if (block->page.io_fix() == BUF_IO_READ) {
-			/* The page is being read to buffer pool,
-			but we cannot wait around for the read to
-			complete. */
-			block->page.unfix();
-			return(NULL);
+		if (UNIV_UNLIKELY(!block->page.frame
+				  || block->page.is_read_fixed())) {
+			/* This mode is only used for dropping an
+			adaptive hash index. There cannot be an
+			adaptive hash index for a compressed-only page
+			or a page that is only being read into the
+			buffer pool. */
+			block->unfix();
+			return nullptr;
 		}
-	}
-
-	ut_ad(block->page.in_file());
-
-	if (UNIV_LIKELY(block->page.frame != nullptr)) {
-		if (UNIV_UNLIKELY(mode == BUF_EVICT_IF_IN_POOL)) {
-evict_from_pool:
+		break;
+	case BUF_GET_IF_IN_POOL:
+	case BUF_EVICT_IF_IN_POOL:
+		while (block->page.is_read_fixed()) {
+			/* The read-fix will be released after
+			block->page.lock in buf_page_t::read_complete() and
+			buf_pool_t::corrupted_evict(). */
+			block->page.lock.s_lock();
+			block->page.lock.s_unlock();
+		}
+		if (mode == BUF_EVICT_IF_IN_POOL) {
 			ut_ad(!block->page.oldest_modification());
 			mysql_mutex_lock(&buf_pool.mutex);
 			block->unfix();
@@ -2673,23 +2674,11 @@ evict_from_pool:
 			}
 
 			mysql_mutex_unlock(&buf_pool.mutex);
-			return(NULL);
+			return nullptr;
 		}
-	} else {
-		if (UNIV_UNLIKELY(mode == BUF_EVICT_IF_IN_POOL)) {
-			goto evict_from_pool;
-		}
+	}
 
-		if (mode == BUF_PEEK_IF_IN_POOL) {
-			/* This mode is only used for dropping an
-			adaptive hash index.  There cannot be an
-			adaptive hash index for a compressed-only
-			page, so do not bother decompressing the page. */
-			block->unfix();
-
-			return(NULL);
-		}
-
+	if (UNIV_UNLIKELY(!block->page.frame)) {
 		if (!block->page.lock.x_lock_try()) {
 retry_page_zip:
 			block->page.unfix();
@@ -2716,9 +2705,10 @@ retry_page_zip:
 
 		/* Buffer-fixing prevents the page_hash from changing. */
 		ut_ad(&block->page == buf_pool.page_hash.get(page_id, chain));
-		ut_ad(block->page.io_fix() == BUF_IO_NONE);
+		block->page.lock.x_unlock();
 
-		if (UNIV_UNLIKELY(block->page.buf_fix_count() != 1)) {
+		/* hash_lock protects us after unfixing */
+		if (block->unfix()) {
 			/* The block was buffer-fixed while
 			buf_pool.mutex was not held by this thread.
 			Free the block that was allocated and retry.
@@ -2733,9 +2723,6 @@ retry_page_zip:
 			goto loop;
 		}
 
-		block->page.unfix(); /* hash_lock protects us after this */
-		block->page.lock.x_unlock();
-
 		/* Move the compressed page from bpage to block,
 		and uncompress it. */
 
@@ -2745,7 +2732,8 @@ retry_page_zip:
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		buf_relocate(&block->page, &new_block->page);
 
-		/* Set after buf_relocate(). */
+		/* Buffer-fix and X-latch the block
+		for the duration of the decompression. */
 		new_block->page.set_buf_fix_count(1);
 		new_block->page.lock.x_lock();
 
@@ -2753,9 +2741,6 @@ retry_page_zip:
 						 &new_block->page);
 		mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
-		/* Buffer-fix, I/O-fix, and X-latch the block
-		for the duration of the decompression.
-		Also add the block to the unzip_LRU list. */
 		new_block->page.set_state(BUF_BLOCK_LRU);
 
 		/* Insert at the front of unzip_LRU list */
@@ -2780,9 +2765,11 @@ retry_page_zip:
 		buf_pool.mutex. */
 
 		if (!buf_zip_decompress(block, false)) {
-			block->unfix();
 			block->page.lock.x_unlock();
+			block->unfix();
 			--buf_pool.n_pend_unzip;
+			/* FIXME: Evict the corrupted
+			ROW_FORMAT=COMPRESSED page! */
 
 			if (err) {
 				*err = DB_PAGE_CORRUPTED;
@@ -2871,22 +2858,15 @@ re_evict:
 	ut_ad(block->page.in_file());
 	ut_ad(block->page.frame);
 
-	/* We have to wait here because the IO_READ state was set
-	under the protection of the hash_lock and not block->lock. */
-	while (block->page.io_fix() == BUF_IO_READ) {
+	while (block->page.is_read_fixed()) {
+		/* The read-fix will be released after
+		block->page.lock in buf_page_t::read_complete() and
+		buf_pool_t::corrupted_evict(). */
 		block->page.lock.s_lock();
 		block->page.lock.s_unlock();
 	}
 
-	if (block->page.id() != page_id) {
-		block->page.unfix();
-
-		if (err) {
-			*err = DB_PAGE_CORRUPTED;
-		}
-
-		return NULL;
-	}
+	ut_ad(block->page.id() == page_id);
 
 	if (block->page.status != buf_page_t::FREED
 	    && allow_ibuf_merge
@@ -2998,8 +2978,7 @@ buf_page_optimistic_get(
 
 	if (have_transactional_memory) {
 	} else if (UNIV_UNLIKELY(!block->page.frame
-				 || !block->page.in_file()
-				 || block->page.io_fix() != BUF_IO_NONE)) {
+				 || !block->page.in_file())) {
 		return FALSE;
 	}
 
@@ -3011,8 +2990,7 @@ buf_page_optimistic_get(
 			buf_pool.page_hash.lock_get(chain)};
 		if (UNIV_UNLIKELY(id != block->page.id()
 				  || !block->page.frame
-				  || !block->page.in_file()
-				  || block->page.io_fix() != BUF_IO_NONE)) {
+				  || !block->page.in_file())) {
 			return FALSE;
 		}
 		block->fix();
@@ -3173,9 +3151,9 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
         because buf_relocate() would likely make the memory transaction
         too large. */
         hash_lock.lock();
-        ut_ad(bpage->io_fix() == BUF_IO_NONE);
-        bpage->unfix();
         bpage->lock.x_unlock();
+        ut_d(const auto f=) bpage->unfix();
+        ut_ad(f < buf_page_t::READ_FIX);
 
         mysql_mutex_lock(&buf_pool.flush_list_mutex);
         buf_relocate(bpage, &free_block->page);
@@ -3318,15 +3296,12 @@ buf_block_t* buf_page_create_deferred(uint32_t space_id, ulint zip_size,
 /** Monitor the buffer page read/write activity, and increment corresponding
 counter value in MONITOR_MODULE_BUF_PAGE.
 @param bpage   buffer page whose read or write was completed
-@param io_type BUF_IO_READ or BUF_IO_WRITE */
-ATTRIBUTE_COLD __attribute__((nonnull))
-void buf_page_monitor(const buf_page_t *bpage, buf_io_fix io_type)
+@param read    true=read, false=write */
+ATTRIBUTE_COLD void buf_page_monitor(const buf_page_t &bpage, bool read)
 {
 	monitor_id_t	counter;
 
-	ut_ad(io_type == BUF_IO_READ || io_type == BUF_IO_WRITE);
-
-	const byte* frame = bpage->zip.data ? bpage->zip.data : bpage->frame;
+	const byte* frame = bpage.zip.data ? bpage.zip.data : bpage.frame;
 
 	switch (fil_page_get_type(frame)) {
 		ulint	level;
@@ -3341,71 +3316,69 @@ void buf_page_monitor(const buf_page_t *bpage, buf_io_fix io_type)
 		    == (index_id_t)(DICT_IBUF_ID_MIN + IBUF_SPACE_ID)) {
 			if (level == 0) {
 				counter = MONITOR_RW_COUNTER(
-					io_type, MONITOR_INDEX_IBUF_LEAF_PAGE);
+					read, MONITOR_INDEX_IBUF_LEAF_PAGE);
 			} else {
 				counter = MONITOR_RW_COUNTER(
-					io_type,
+					read,
 					MONITOR_INDEX_IBUF_NON_LEAF_PAGE);
 			}
 		} else {
 			if (level == 0) {
 				counter = MONITOR_RW_COUNTER(
-					io_type, MONITOR_INDEX_LEAF_PAGE);
+					read, MONITOR_INDEX_LEAF_PAGE);
 			} else {
 				counter = MONITOR_RW_COUNTER(
-					io_type, MONITOR_INDEX_NON_LEAF_PAGE);
+					read, MONITOR_INDEX_NON_LEAF_PAGE);
 			}
 		}
 		break;
 
 	case FIL_PAGE_UNDO_LOG:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_UNDO_LOG_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_UNDO_LOG_PAGE);
 		break;
 
 	case FIL_PAGE_INODE:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_INODE_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_INODE_PAGE);
 		break;
 
 	case FIL_PAGE_IBUF_FREE_LIST:
-		counter = MONITOR_RW_COUNTER(io_type,
-					     MONITOR_IBUF_FREELIST_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_IBUF_FREELIST_PAGE);
 		break;
 
 	case FIL_PAGE_IBUF_BITMAP:
-		counter = MONITOR_RW_COUNTER(io_type,
-					     MONITOR_IBUF_BITMAP_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_IBUF_BITMAP_PAGE);
 		break;
 
 	case FIL_PAGE_TYPE_SYS:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_SYSTEM_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_SYSTEM_PAGE);
 		break;
 
 	case FIL_PAGE_TYPE_TRX_SYS:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_TRX_SYSTEM_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_TRX_SYSTEM_PAGE);
 		break;
 
 	case FIL_PAGE_TYPE_FSP_HDR:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_FSP_HDR_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_FSP_HDR_PAGE);
 		break;
 
 	case FIL_PAGE_TYPE_XDES:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_XDES_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_XDES_PAGE);
 		break;
 
 	case FIL_PAGE_TYPE_BLOB:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_BLOB_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_BLOB_PAGE);
 		break;
 
 	case FIL_PAGE_TYPE_ZBLOB:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_ZBLOB_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_ZBLOB_PAGE);
 		break;
 
 	case FIL_PAGE_TYPE_ZBLOB2:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_ZBLOB2_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_ZBLOB2_PAGE);
 		break;
 
 	default:
-		counter = MONITOR_RW_COUNTER(io_type, MONITOR_OTHER_PAGE);
+		counter = MONITOR_RW_COUNTER(read, MONITOR_OTHER_PAGE);
 	}
 
 	MONITOR_INC_NOCHECK(counter);
@@ -3537,20 +3510,18 @@ static dberr_t buf_page_check_corrupt(buf_page_t *bpage,
 	return (err);
 }
 
-/** Complete a read request of a file page to buf_pool.
-@param bpage    recently read page
+/** Complete a read of a page.
 @param node     data file
 @return whether the operation succeeded
-@retval DB_SUCCESS              always when writing, or if a read page was OK
-@retval DB_PAGE_CORRUPTED       if the checksum fails on a page read
-@retval DB_DECRYPTION_FAILED    if the page cannot be decrypted */
-dberr_t buf_page_read_complete(buf_page_t *bpage, const fil_node_t &node)
+@retval DB_PAGE_CORRUPTED    if the checksum fails
+@retval DB_DECRYPTION_FAILED if the page cannot be decrypted */
+dberr_t buf_page_t::read_complete(const fil_node_t &node)
 {
-  const page_id_t id(bpage->id());
-  ut_ad(bpage->in_file());
-  ut_ad(!buf_dblwr.is_inside(id));
-  ut_ad(id.space() == node.space->id);
-  ut_ad(bpage->zip_size() == node.space->zip_size());
+  const page_id_t expected_id{id()};
+  ut_ad(in_file());
+  ut_ad(!buf_dblwr.is_inside(id()));
+  ut_ad(id().space() == node.space->id);
+  ut_ad(zip_size() == node.space->zip_size());
 
   /* We do not need protect io_fix here by mutex to read it because
   this and buf_page_write_complete() are the only functions where we can
@@ -3558,85 +3529,85 @@ dberr_t buf_page_read_complete(buf_page_t *bpage, const fil_node_t &node)
   value, and our code ensures that this is the only thread that handles
   the i/o for this block. */
 
-  ut_ad(bpage->io_fix() == BUF_IO_READ);
-  ut_ad(!!bpage->zip.ssize == !!bpage->zip.data);
+  ut_ad(is_read_fixed());
+  ut_ad(!!zip.ssize == !!zip.data);
 
-  const byte *frame= bpage->zip.data ? bpage->zip.data : bpage->frame;
-  ut_ad(frame);
+  const byte *read_frame= zip.data ? zip.data : frame;
+  ut_ad(read_frame);
 
   dberr_t err;
-  if (!buf_page_decrypt_after_read(bpage, node))
+  if (!buf_page_decrypt_after_read(this, node))
   {
     err= DB_DECRYPTION_FAILED;
     goto database_corrupted;
   }
 
-  if (bpage->belongs_to_unzip_LRU())
+  if (belongs_to_unzip_LRU())
   {
     buf_pool.n_pend_unzip++;
-    auto ok= buf_zip_decompress(reinterpret_cast<buf_block_t*>(bpage), FALSE);
+    auto ok= buf_zip_decompress(reinterpret_cast<buf_block_t*>(this), false);
     buf_pool.n_pend_unzip--;
 
     if (!ok)
     {
-      ib::info() << "Page " << id << " zip_decompress failure.";
+      ib::info() << "Page " << expected_id << " zip_decompress failure.";
       err= DB_PAGE_CORRUPTED;
       goto database_corrupted;
     }
   }
 
   {
-    const page_id_t read_id(mach_read_from_4(frame + FIL_PAGE_SPACE_ID),
-                            mach_read_from_4(frame + FIL_PAGE_OFFSET));
+    const page_id_t read_id(mach_read_from_4(read_frame + FIL_PAGE_SPACE_ID),
+                            mach_read_from_4(read_frame + FIL_PAGE_OFFSET));
 
-    if (read_id == id);
+    if (read_id == expected_id);
     else if (read_id == page_id_t(0, 0))
       /* This is likely an uninitialized page. */;
     else if (!node.space->full_crc32() &&
-             page_id_t(0, read_id.page_no()) == id)
+             page_id_t(0, read_id.page_no()) == expected_id)
       /* FIL_PAGE_SPACE_ID was written as garbage in the system tablespace
       before MySQL 4.1.1, which introduced innodb_file_per_table. */;
     else if (node.space->full_crc32() &&
              *reinterpret_cast<const uint32_t*>
-             (&frame[FIL_PAGE_FCRC32_KEY_VERSION]) &&
+             (&read_frame[FIL_PAGE_FCRC32_KEY_VERSION]) &&
              node.space->crypt_data &&
              node.space->crypt_data->type != CRYPT_SCHEME_UNENCRYPTED)
     {
-      ib::error() << "Cannot decrypt " << id;
+      ib::error() << "Cannot decrypt " << expected_id;
       err= DB_DECRYPTION_FAILED;
       goto release_page;
     }
     else
       ib::error() << "Space id and page no stored in the page, read in are "
-                  << read_id << ", should be " << id;
+                  << read_id << ", should be " << expected_id;
   }
 
-  err= buf_page_check_corrupt(bpage, node);
+  err= buf_page_check_corrupt(this, node);
   if (UNIV_UNLIKELY(err != DB_SUCCESS))
   {
 database_corrupted:
     /* Not a real corruption if it was triggered by error injection */
     DBUG_EXECUTE_IF("buf_page_import_corrupt_failure",
-                    if (!is_predefined_tablespace(id.space()))
+                    if (!is_predefined_tablespace(id().space()))
                     {
-                      buf_corrupt_page_release(bpage, node);
+                      buf_corrupt_page_release(this, node);
                       ib::info() << "Simulated IMPORT corruption";
                       return err;
                     }
                     err= DB_SUCCESS;
                     goto page_not_corrupt;);
 
-    if (bpage->belongs_to_unzip_LRU())
-      memset_aligned<UNIV_PAGE_SIZE_MIN>(bpage->frame, 0, srv_page_size);
+    if (belongs_to_unzip_LRU())
+      memset_aligned<UNIV_PAGE_SIZE_MIN>(frame, 0, srv_page_size);
 
     if (err == DB_PAGE_CORRUPTED)
     {
       ib::error() << "Database page corruption on disk"
                      " or a failed read of file '"
-                  << node.name << "' page " << id
+                  << node.name << "' page " << expected_id
                   << ". You may have to recover from a backup.";
 
-      buf_page_print(frame, bpage->zip_size());
+      buf_page_print(read_frame, zip_size());
 
       ib::info() << " You can use CHECK TABLE to scan"
                     " your table for corruption. "
@@ -3647,41 +3618,42 @@ database_corrupted:
     {
       /* If the corruption is in the system tablespace, we will
       intentionally crash the server. */
-      if (id.space() == TRX_SYS_SPACE)
+      if (expected_id.space() == TRX_SYS_SPACE)
         ib::fatal() << "Aborting because of a corrupt database page.";
-      buf_corrupt_page_release(bpage, node);
+      buf_corrupt_page_release(this, node);
       return err;
     }
   }
 
   DBUG_EXECUTE_IF("buf_page_import_corrupt_failure",
-                  page_not_corrupt: bpage= bpage; );
+                  page_not_corrupt: err= err; );
 
   if (err == DB_PAGE_CORRUPTED || err == DB_DECRYPTION_FAILED)
   {
 release_page:
-    buf_corrupt_page_release(bpage, node);
+    buf_corrupt_page_release(this, node);
     if (recv_recovery_is_on())
-      recv_sys.free_corrupted_page(id);
+      recv_sys.free_corrupted_page(expected_id);
     return err;
   }
 
   if (recv_recovery_is_on())
-    recv_recover_page(node.space, bpage);
+    recv_recover_page(node.space, this);
 
-  if (bpage->frame && !recv_no_ibuf_operations &&
-      (!id.space() || !is_predefined_tablespace(id.space())) &&
-      fil_page_get_type(frame) == FIL_PAGE_INDEX &&
-      page_is_leaf(frame))
-    bpage->ibuf_exist= true;
+  if (frame && !recv_no_ibuf_operations &&
+      (!expected_id.space() ||
+       !is_predefined_tablespace(expected_id.space())) &&
+      fil_page_get_type(read_frame) == FIL_PAGE_INDEX &&
+      page_is_leaf(read_frame))
+    ibuf_exist= true;
 
   if (UNIV_UNLIKELY(MONITOR_IS_ON(MONITOR_MODULE_BUF_PAGE)))
-    buf_page_monitor(bpage, BUF_IO_READ);
-  DBUG_PRINT("ib_buf", ("read page %u:%u",
-                        id.space(), id.page_no()));
+    buf_page_monitor(*this, true);
+  DBUG_PRINT("ib_buf", ("read page %u:%u", id().space(), id().page_no()));
 
-  bpage->io_unfix();
-  bpage->lock.x_unlock(true);
+  lock.x_unlock(true);
+  ut_d(auto f=) buf_fix_count_-= READ_FIX;
+  ut_ad(f < READ_FIX);
 
   ut_d(auto n=) buf_pool.n_pend_reads--;
   ut_ad(n > 0);
@@ -3947,7 +3919,7 @@ ulint buf_get_latched_pages_number()
 
   for (buf_page_t *b= UT_LIST_GET_FIRST(buf_pool.LRU); b;
        b= UT_LIST_GET_NEXT(LRU, b))
-    if (b->in_file() && (b->buf_fix_count() || b->io_fix() != BUF_IO_NONE))
+    if (b->in_file() && b->fix_count_raw())
       fixed_pages_number++;
 
   mysql_mutex_unlock(&buf_pool.mutex);

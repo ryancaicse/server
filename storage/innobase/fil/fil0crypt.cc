@@ -2442,7 +2442,7 @@ bool fil_space_verify_crypt_checksum(const byte* page, ulint zip_size)
 
 	/* Compressed and encrypted pages do not have checksum. Assume not
 	corrupted. Page verification happens after decompression in
-	buf_page_read_complete() using buf_page_is_corrupted(). */
+	buf_page_t::read_complete() using buf_page_is_corrupted(). */
 	if (fil_page_get_type(page) == FIL_PAGE_PAGE_COMPRESSED_ENCRYPTED) {
 		return true;
 	}

@@ -500,18 +500,8 @@ if applicable. */
 /** Monitor the buffer page read/write activity, and increment corresponding
 counter value in MONITOR_MODULE_BUF_PAGE.
 @param bpage   buffer page whose read or write was completed
-@param io_type BUF_IO_READ or BUF_IO_WRITE */
-ATTRIBUTE_COLD __attribute__((nonnull))
-void buf_page_monitor(const buf_page_t *bpage, buf_io_fix io_type);
-
-/** Complete a read request of a file page to buf_pool.
-@param bpage    recently read page
-@param node     data file
-@return whether the operation succeeded
-@retval DB_SUCCESS              always when writing, or if a read page was OK
-@retval DB_PAGE_CORRUPTED       if the checksum fails on a page read
-@retval DB_DECRYPTION_FAILED    if the page cannot be decrypted */
-dberr_t buf_page_read_complete(buf_page_t *bpage, const fil_node_t &node);
+@param read    true=read, false=write */
+ATTRIBUTE_COLD void buf_page_monitor(const buf_page_t &bpage, bool read);
 
 /** Calculate aligned buffer pool size based on srv_buf_pool_chunk_unit,
 if needed.
@@ -603,9 +593,6 @@ private:
   (because id().space() is the temporary tablespace). */
   Atomic_relaxed<lsn_t> oldest_modification_;
 
-  /** type of pending I/O operation; protected by buf_pool.mutex
-  if in_LRU_list */
-  Atomic_relaxed<buf_io_fix> io_fix_;
   /** Block state.
   State transitions to
   BUF_BLOCK_REMOVE_HASH are protected by buf_pool.page_hash.lock_get()
@@ -614,6 +601,12 @@ private:
   buf_page_state state_;
 
 public:
+  /** read-fix flag in fix_count_raw() */
+  static constexpr uint32_t READ_FIX= 1U << 30;
+  /** write-fix flag in fix_count_raw() */
+  static constexpr uint32_t WRITE_FIX= 2U << 30;
+  /** io-fix mask in fix_count_raw() */
+  static constexpr uint32_t IO_FIX= 3U << 30;
   /** lock covering frame */
   block_lock lock;
   /** pointer to aligned, uncompressed page frame of innodb_page_size */
@@ -680,12 +673,10 @@ public:
 					and bytes allocated for recv_sys.pages,
 					the field is protected by
 					recv_sys_t::mutex. */
-  /** Change buffer entries for the page exist.
-  Protected by io_fix()==BUF_IO_READ or by buf_block_t::lock. */
+  /** Change buffer entries for the page exist. Protected by lock. */
   bool ibuf_exist;
 
-  /** Block initialization status. Can be modified while holding io_fix()
-  or buf_block_t::lock X-latch */
+  /** Block initialization status. Protected by lock. */
   enum {
     /** the page was read normally and should be flushed normally */
     NORMAL = 0,
@@ -707,7 +698,7 @@ public:
 
   buf_page_t(const buf_page_t &b) :
     id_(b.id_), buf_fix_count_(b.buf_fix_count_),
-    oldest_modification_(b.oldest_modification_), io_fix_(b.io_fix_),
+    oldest_modification_(b.oldest_modification_),
     state_(b.state_),
     lock() /* not copied */,
     frame(b.frame), hash(b.hash), zip(b.zip),
@@ -724,7 +715,6 @@ public:
   /** Initialize some fields */
   void init()
   {
-    io_fix_= BUF_IO_NONE;
     buf_fix_count_= 0;
     oldest_modification_= 0;
     lock.init();
@@ -760,13 +750,11 @@ public:
 public:
   const page_id_t &id() const { return id_; }
   buf_page_state state() const { return state_; }
-  uint32_t buf_fix_count() const { return buf_fix_count_; }
-  buf_io_fix io_fix() const { return io_fix_; }
-  void io_unfix()
-  {
-    ut_ad(io_fix() == BUF_IO_READ);
-    io_fix_= BUF_IO_NONE;
-  }
+  uint32_t fix_count_raw() const { return buf_fix_count_; }
+  uint32_t buf_fix_count() const { return buf_fix_count_ & ~IO_FIX; }
+  bool is_write_fixed() const { return buf_fix_count_ & WRITE_FIX; }
+  bool is_read_fixed() const { return buf_fix_count_ & READ_FIX; }
+  uint32_t io_fix() const { return buf_fix_count_ >> 30; }
 
   /** @return if this belongs to buf_pool.unzip_LRU */
   bool belongs_to_unzip_LRU() const
@@ -775,7 +763,6 @@ public:
   inline void add_buf_fix_count(uint32_t count);
   inline void set_buf_fix_count(uint32_t count);
   inline void set_state(buf_page_state state);
-  inline void set_io_fix(buf_io_fix io_fix);
   inline void set_corrupt_id();
 
   /** @return the log sequence number of the oldest pending modification
@@ -802,9 +789,22 @@ public:
     oldest_modification_.store(1, std::memory_order_release);
   }
 
+  /** Complete a read of a page.
+  @param node     data file
+  @return whether the operation succeeded
+  @retval DB_PAGE_CORRUPTED    if the checksum fails
+  @retval DB_DECRYPTION_FAILED if the page cannot be decrypted */
+  dberr_t read_complete(const fil_node_t &node);
+
   /** Note that a block is no longer dirty, while not removing
   it from buf_pool.flush_list */
   inline void write_complete(bool temporary);
+
+  /** Write a flushable page to a file. buf_pool.mutex must be held.
+  @param lru         true=buf_pool.LRU; false=buf_pool.flush_list
+  @param space       tablespace
+  @return whether the page was flushed and buf_pool.mutex was released */
+  inline bool flush(bool lru, fil_space_t *space);
 
   /** Notify that a page in a temporary tablespace has been modified. */
   void set_temp_modified()
@@ -829,7 +829,6 @@ public:
   uint32_t unfix()
   {
     uint32_t count= buf_fix_count_--;
-    ut_ad(count != 0);
     return count - 1;
   }
 
@@ -1317,7 +1316,7 @@ public:
   }
 
   /** Determine whether a frame is intended to be withdrawn during resize().
-  @param ptr    pointer within a buf_block_t::frame
+  @param ptr    pointer within a buf_page_t::frame
   @return whether the frame will be withdrawn */
   bool will_be_withdrawn(const byte *ptr) const
   {
@@ -1760,7 +1759,7 @@ public:
   }
 
   // os_aio_pending_writes()
-  // is approximately COUNT(io_fix()==BUF_IO_WRITE) in flush_list
+  // is approximately COUNT(is_write_fixed()) in flush_list
 
 	unsigned	freed_page_clock;/*!< a sequence number used
 					to count the number of buffer
@@ -1953,12 +1952,14 @@ inline void page_hash_latch::lock()
 inline void buf_page_t::add_buf_fix_count(uint32_t count)
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
+  ut_ad(count < WRITE_FIX);
   buf_fix_count_+= count;
 }
 
 inline void buf_page_t::set_buf_fix_count(uint32_t count)
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
+  ut_ad(count < READ_FIX);
   buf_fix_count_= count;
 }
 
@@ -1971,12 +1972,6 @@ inline void buf_page_t::set_state(buf_page_state state)
         buf_pool.page_hash.lock_get(buf_pool.page_hash.cell_get(id_.fold())).
         is_write_locked());
   state_= state;
-}
-
-inline void buf_page_t::set_io_fix(buf_io_fix io_fix)
-{
-  mysql_mutex_assert_owner(&buf_pool.mutex);
-  io_fix_= io_fix;
 }
 
 inline void buf_page_t::set_corrupt_id()
@@ -2039,7 +2034,7 @@ inline bool buf_page_t::ready_for_flush() const
   ut_ad(in_LRU_list);
   ut_a(in_file());
   ut_ad(!fsp_is_system_temporary(id().space()) || oldest_modification() == 2);
-  return io_fix_ == BUF_IO_NONE;
+  return !io_fix();
 }
 
 /** @return whether the block can be relocated in memory.
@@ -2049,7 +2044,7 @@ inline bool buf_page_t::can_relocate() const
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(in_file());
   ut_ad(in_LRU_list);
-  return io_fix_ == BUF_IO_NONE && !buf_fix_count_;
+  return !buf_fix_count_;
 }
 
 /** @return whether the block has been flagged old in buf_pool.LRU */
@@ -2110,31 +2105,24 @@ inline void buf_page_t::set_old(bool old)
 /**********************************************************************
 Let us list the consistency conditions for different control block states.
 
-NOT_USED:	is in free list, not in LRU list, not in flush list, nor
-		page hash table
-MEMORY:		is not in free list, LRU list, or flush list, nor page
-		hash table
-LRU:		space and offset are defined, is in buf_pool.page_hash
-		if io_fix == BUF_IO_WRITE,
-			buf_pool.n_flush_LRU() || buf_pool.n_flush_list()
+NOT_USED:	is in free list, not LRU, not flush_list, nor page_hash
+MEMORY:		is not in free list, LRU list, flush_list, nor page_hash
+LRU:		is not in free list; id() is defined, is in page_hash
 
-		(1) if buf_fix_count == 0, then
-			is in LRU list, not in free list
-			is in flush list,
-				if and only if oldest_modification > 0
+		is in buf_pool.flush_list, if and only
+		if oldest_modification == 1 || oldest_modification > 2
+
+		(1) if buf_fix_count() == 0, then
+			is in LRU list
 			is x-locked,
-				if and only if io_fix == BUF_IO_READ
-			is s-locked,
-				if and only if io_fix == BUF_IO_WRITE
+				if and only if is_read_fixed()
+			is u-locked,
+				if and only if is_write_fixed()
 
-		(2) if buf_fix_count > 0, then
-			is not in LRU list, not in free list
-			is in flush list,
-				if and only if oldest_modification > 0
-			if io_fix == BUF_IO_READ,
-				is x-locked
-			if io_fix == BUF_IO_WRITE,
-				is s-locked
+		(2) if buf_fix_count() > 0, then
+			is not in LRU list (??? FIXME)
+			if is_read_fixed(), is x-locked
+			if io_write_fixed(), is u-locked
 
 State transitions:
 
@@ -2142,9 +2130,7 @@ NOT_USED => MEMORY
 MEMORY => LRU
 MEMORY => NOT_USED
 LRU => NOT_USED	NOTE: This transition is allowed if and only if
-				(1) buf_fix_count == 0,
-				(2) oldest_modification == 0, and
-				(3) io_fix == 0.
+				!fix_count_raw() && !oldest_modification().
 */
 
 /** Select from where to start a scan. If we have scanned
