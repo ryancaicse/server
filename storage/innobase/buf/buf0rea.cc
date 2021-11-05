@@ -145,7 +145,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
         ut_a(buf_fix_count);
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
         buf_pool.watch_remove(hash_page, chain);
-        block->page.add_buf_fix_count(buf_fix_count - BUF_BLOCK_LRU);
+        block->page.add_buf_fix_count(buf_fix_count);
       }
 
       buf_pool.page_hash.append(chain, &block->page);
@@ -215,7 +215,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
         waiting for buf_pool.mutex, which we are holding. */
         uint32_t buf_fix_count= hash_page->raw_fix_count() - BUF_BLOCK_LRU;
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
-        bpage->add_buf_fix_count(buf_fix_count - BUF_BLOCK_LRU);
+        bpage->add_buf_fix_count(buf_fix_count);
         buf_pool.watch_remove(hash_page, chain);
       }
 
