@@ -995,8 +995,11 @@ public:
 					continue;
 				}
 				mysql_mutex_unlock(&recv_sys.mutex);
-				block->page.ibuf_exist = ibuf_page_exists(
-					block->page.id(), block->zip_size());
+				if (ibuf_page_exists(block->page.id(),
+						     block->zip_size())) {
+					block->page.status
+						= buf_page_t::IBUF_EXIST;
+				}
 				mtr.commit();
 				mtr.start();
 				mysql_mutex_lock(&recv_sys.mutex);

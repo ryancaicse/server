@@ -658,13 +658,12 @@ public:
 					and bytes allocated for recv_sys.pages,
 					the field is protected by
 					recv_sys_t::mutex. */
-  /** Change buffer entries for the page exist. Protected by lock. */
-  bool ibuf_exist;
-
   /** Block initialization status. Protected by lock. */
   enum {
     /** the page was read normally and should be flushed normally */
-    NORMAL = 0,
+    NORMAL= 0,
+    /** the page was read normally, but change buffer entries exist */
+    IBUF_EXIST,
     /** the page was (re)initialized, and the doublewrite buffer can be
     skipped on the next flush */
     INIT_ON_FLUSH,
@@ -673,7 +672,7 @@ public:
     Else if innodb_immediate_scrub_data_uncompressed, the page will
     be overwritten with zeroes. */
     FREED
-  } status;
+  } status; // FIXME: merge to state()?
 
   buf_page_t() : id_{0}
   {
@@ -691,7 +690,7 @@ public:
     in_page_hash(b.in_page_hash), in_free_list(b.in_free_list),
 #endif /* UNIV_DEBUG */
     list(b.list), LRU(b.LRU), old(b.old), freed_page_clock(b.freed_page_clock),
-    access_time(b.access_time), ibuf_exist(b.ibuf_exist), status(b.status)
+    access_time(b.access_time), status(b.status)
   {
     lock.init();
   }
@@ -711,7 +710,6 @@ public:
     old= 0;
     freed_page_clock= 0;
     access_time= 0;
-    ibuf_exist= false;
     status= NORMAL;
   }
 
@@ -728,7 +726,6 @@ public:
   bool belongs_to_unzip_LRU() const
   { return UNIV_LIKELY_NULL(zip.data) && frame; }
 
-  inline void add_buf_fix_count(uint32_t count);
   inline void set_state(uint32_t count);
   inline void set_corrupt_id();
 
@@ -798,12 +795,16 @@ public:
     ut_ad(f < WRITE_FIX);
   }
 
-  void fix()
+  uint32_t fix(uint32_t count= 1)
   {
-    ut_d(const auto f=) zip.fix.fetch_add(1);
+    ut_ad(count);
+    ut_ad(count < UNFIXED);
+    uint32_t f= zip.fix.fetch_add(count);
     ut_ad(f >= UNFIXED);
     ut_ad(!((f ^ (f + 1)) & LRU_MASK));
+    return f;
   }
+
   uint32_t unfix()
   {
     uint32_t f= zip.fix.fetch_sub(1);
@@ -1921,14 +1922,6 @@ inline void page_hash_latch::lock()
     write_lock_wait();
 }
 #endif /* SUX_LOCK_GENERIC */
-
-inline void buf_page_t::add_buf_fix_count(uint32_t count)
-{
-  mysql_mutex_assert_owner(&buf_pool.mutex);
-  ut_ad(count < UNFIXED);
-  ut_d(auto f=) zip.fix.fetch_add(count);
-  ut_ad(!((f ^ (f + count)) & LRU_MASK));
-}
 
 inline void buf_page_t::set_state(uint32_t count)
 {

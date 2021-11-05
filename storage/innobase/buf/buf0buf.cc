@@ -2741,7 +2741,7 @@ retry_page_zip:
 
 		if (!access_time && !recv_no_ibuf_operations
 		    && ibuf_page_exists(block->page.id(), block->zip_size())) {
-			block->page.ibuf_exist = true;
+			block->page.status = buf_page_t::IBUF_EXIST;
 		}
 
 		/* Decompress the page while not holding
@@ -2851,8 +2851,8 @@ re_evict:
 	    && page_is_leaf(block->page.frame)) {
 		block->page.lock.x_lock();
 
-		if (block->page.ibuf_exist) {
-			block->page.ibuf_exist = false;
+		if (block->page.status == buf_page_t::IBUF_EXIST) {
+			block->page.status = buf_page_t::NORMAL;
 			ibuf_merge_or_delete_for_page(block, page_id,
 						      block->zip_size());
 		}
@@ -2915,7 +2915,11 @@ buf_page_get_gen(
              page_is_leaf(block->page.frame))
     {
       block->page.lock.x_lock();
-      block->page.ibuf_exist= false;
+      while (block->page.is_io_fixed())
+        /* The io-fix will be released after block->page.lock in
+        buf_page_t::read_complete(). */
+        (void) LF_BACKOFF();
+      block->page.status= buf_page_t::NORMAL;
       ibuf_merge_or_delete_for_page(block, page_id, block->zip_size());
 
       if (rw_latch == RW_X_LATCH)
@@ -3106,13 +3110,17 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
 #endif
     if (!mtr->have_x_latch(reinterpret_cast<const buf_block_t&>(*bpage)))
     {
-      bpage->fix();
+      const auto f= bpage->fix();
       if (!bpage->lock.x_lock_try())
       {
         mysql_mutex_unlock(&buf_pool.mutex);
         bpage->lock.x_lock();
+        while (bpage->is_io_fixed()) (void) LF_BACKOFF();
         mysql_mutex_lock(&buf_pool.mutex);
       }
+      else if (f >= buf_page_t::READ_FIX)
+        do (void) LF_BACKOFF(); while (bpage->is_io_fixed());
+
       if (UNIV_LIKELY(bpage->frame != nullptr))
       {
         buf_block_t *block= reinterpret_cast<buf_block_t*>(bpage);
@@ -3146,7 +3154,7 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
     }
     else
     {
-      ut_ad(!bpage->ibuf_exist);
+      ut_ad(bpage->status != buf_page_t::IBUF_EXIST);
       ut_ad(bpage->frame);
 #ifdef BTR_CUR_HASH_ADAPT
       ut_ad(!reinterpret_cast<buf_block_t*>(bpage)->index);
@@ -3160,11 +3168,11 @@ static buf_block_t* buf_page_create_low(page_id_t page_id, ulint zip_size,
       btr_search_drop_page_hash_index(reinterpret_cast<buf_block_t*>(bpage));
 #endif /* BTR_CUR_HASH_ADAPT */
 
-    if (bpage->ibuf_exist)
+    if (bpage->status == buf_page_t::IBUF_EXIST)
     {
       if (!recv_recovery_is_on())
         ibuf_merge_or_delete_for_page(nullptr, page_id, zip_size);
-      bpage->ibuf_exist= false;
+      bpage->status= buf_page_t::NORMAL;
     }
 
     return reinterpret_cast<buf_block_t*>(bpage);
@@ -3620,7 +3628,7 @@ release_page:
        !is_predefined_tablespace(expected_id.space())) &&
       fil_page_get_type(read_frame) == FIL_PAGE_INDEX &&
       page_is_leaf(read_frame))
-    ibuf_exist= true;
+    status= IBUF_EXIST;
 
   if (UNIV_UNLIKELY(MONITOR_IS_ON(MONITOR_MODULE_BUF_PAGE)))
     buf_page_monitor(*this, true);

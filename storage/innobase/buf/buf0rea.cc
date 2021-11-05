@@ -145,7 +145,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
         ut_a(buf_fix_count >= buf_page_t::UNFIXED);
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
         buf_pool.watch_remove(hash_page, chain);
-        block->page.add_buf_fix_count(buf_fix_count - buf_page_t::UNFIXED);
+        block->page.fix(buf_fix_count - buf_page_t::UNFIXED);
       }
 
       buf_pool.page_hash.append(chain, &block->page);
@@ -216,7 +216,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
         uint32_t buf_fix_count= hash_page->state();
         ut_a(buf_fix_count >= buf_page_t::UNFIXED);
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
-        bpage->add_buf_fix_count(buf_fix_count - buf_page_t::UNFIXED);
+        bpage->fix(buf_fix_count - buf_page_t::UNFIXED);
         buf_pool.watch_remove(hash_page, chain);
       }
 

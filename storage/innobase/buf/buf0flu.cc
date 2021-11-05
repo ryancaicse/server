@@ -368,7 +368,8 @@ void buf_page_write_complete(const IORequest &request)
     bpage->status= buf_page_t::NORMAL;
   else
   {
-    ut_ad(bpage->status == buf_page_t::NORMAL);
+    ut_ad(bpage->status == buf_page_t::NORMAL ||
+          bpage->status == buf_page_t::IBUF_EXIST);
     if (request.node->space->use_doublewrite())
     {
       ut_ad(request.node->space != fil_system.temp_space);
@@ -842,7 +843,6 @@ inline bool buf_page_t::flush(bool lru, fil_space_t *space)
   page_t *write_frame= zip.data;
 
   space->reacquire();
-  ut_ad(status == NORMAL || status == INIT_ON_FLUSH);
   size_t size;
 #if defined HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE || defined _WIN32
   size_t orig_size;
@@ -901,7 +901,9 @@ inline bool buf_page_t::flush(bool lru, fil_space_t *space)
     write_frame= page;
   }
 
-  if (status != NORMAL || !space->use_doublewrite())
+  ut_ad(status == NORMAL || status == INIT_ON_FLUSH || status == IBUF_EXIST);
+
+  if (status == INIT_ON_FLUSH || !space->use_doublewrite())
   {
     if (UNIV_LIKELY(space->purpose == FIL_TYPE_TABLESPACE))
     {
@@ -1210,6 +1212,9 @@ static void buf_flush_discard_page(buf_page_t *bpage)
 
   if (!bpage->lock.u_lock_try(false))
     return;
+
+  while (bpage->is_io_fixed())
+    (void) LF_BACKOFF();
 
   bpage->status= buf_page_t::NORMAL;
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
