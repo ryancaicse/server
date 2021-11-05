@@ -1,0 +1,15 @@
+--echo #
+--echo # MDEV-5271 Support engine-defined attributes per partition
+--echo #
+
+--source include/have_partition.inc
+--source include/have_innodb.inc
+
+CREATE TABLE `t` (
+  `id` int(11) DEFAULT NULL
+) ENGINE=InnoDB PARTITION BY RANGE(id) (
+    PARTITION pt1 VALUES LESS THAN (100) ENCRYPTED=0,
+    PARTITION pt2 VALUES LESS THAN MAXVALUE
+);
+
+DROP TABLE t;

@@ -5086,6 +5086,10 @@ opt_part_option:
           { Lex->part_info->curr_part_elem->index_file_name= $4.str; }
         | COMMENT_SYM opt_equal TEXT_STRING_sys
           { Lex->part_info->curr_part_elem->part_comment= $3.str; }
+        | IDENT_sys equal TEXT_STRING_sys {}
+        | IDENT_sys equal ident {}
+        | IDENT_sys equal real_ulonglong_num {}
+        | IDENT_sys equal DEFAULT {}
         ;
 
 opt_versioning_rotation:
