@@ -525,7 +525,7 @@ inline void mtr_t::init(buf_block_t *b)
     m_freed_space= nullptr;
   }
 
-  b->page.status= buf_page_t::INIT_ON_FLUSH;
+  b->page.set_inited();
 
   if (m_log_mode != MTR_LOG_ALL)
   {

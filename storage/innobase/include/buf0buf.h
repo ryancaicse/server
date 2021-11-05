@@ -594,6 +594,18 @@ public:
   static constexpr uint32_t WRITE_FIX= 3U << 30;
   /** buf_pool.LRU status mask in state() */
   static constexpr uint32_t LRU_MASK= WRITE_FIX;
+
+  /** status() for a normally read page that must be written normally */
+  static constexpr uint32_t NORMAL= 0;
+  /** status() if buffered changes may exist */
+  static constexpr uint32_t IBUF_EXIST= 1U << 28;
+  /** status() of a (re)initialized page that does not need doublewrite */
+  static constexpr uint32_t INIT_ON_FLUSH= 2U << 28;
+  /** status() of a freed page */
+  static constexpr uint32_t FREED= 3U << 28;
+  /** status() mask in state() */
+  static constexpr uint32_t STATUS_MASK= FREED;
+
   /** lock covering the contents of frame */
   block_lock lock;
   /** pointer to aligned, uncompressed page frame of innodb_page_size */
@@ -658,22 +670,6 @@ public:
 					and bytes allocated for recv_sys.pages,
 					the field is protected by
 					recv_sys_t::mutex. */
-  /** Block initialization status. Protected by lock. */
-  enum {
-    /** the page was read normally and should be flushed normally */
-    NORMAL= 0,
-    /** the page was read normally, but change buffer entries exist */
-    IBUF_EXIST,
-    /** the page was (re)initialized, and the doublewrite buffer can be
-    skipped on the next flush */
-    INIT_ON_FLUSH,
-    /** the page was freed and need to be flushed.
-    For page_compressed, page flush will punch a hole to free space.
-    Else if innodb_immediate_scrub_data_uncompressed, the page will
-    be overwritten with zeroes. */
-    FREED
-  } status; // FIXME: merge to state()?
-
   buf_page_t() : id_{0}
   {
     static_assert(NOT_USED == 0, "compatibility");
@@ -690,7 +686,7 @@ public:
     in_page_hash(b.in_page_hash), in_free_list(b.in_free_list),
 #endif /* UNIV_DEBUG */
     list(b.list), LRU(b.LRU), old(b.old), freed_page_clock(b.freed_page_clock),
-    access_time(b.access_time), status(b.status)
+    access_time(b.access_time)
   {
     lock.init();
   }
@@ -699,6 +695,7 @@ public:
   void init(uint32_t state, page_id_t id)
   {
     ut_ad(state < REMOVE_HASH || state >= UNFIXED);
+    ut_ad(!(state & STATUS_MASK));
     id_= id;
     zip.fix= state;
     oldest_modification_= 0;
@@ -710,17 +707,39 @@ public:
     old= 0;
     freed_page_clock= 0;
     access_time= 0;
-    status= NORMAL;
   }
 
 public:
   const page_id_t &id() const { return id_; }
   uint32_t state() const { return zip.fix; }
+  uint32_t state_without_status() { return state() & ~STATUS_MASK; }
+  uint32_t status() const { ut_ad(in_file()); return state() & STATUS_MASK; }
   uint32_t buf_fix_count() const
-  { uint32_t f= state(); ut_ad(f & LRU_MASK); return ~LRU_MASK & f; }
+  {
+    uint32_t f= state();
+    ut_ad(f & LRU_MASK);
+    return ~(LRU_MASK | STATUS_MASK) & f;
+  }
   bool is_io_fixed() const { return state() >= READ_FIX; }
   bool is_write_fixed() const { return state() >= WRITE_FIX; }
   bool is_read_fixed() const { return is_io_fixed() && !is_write_fixed(); }
+
+  /** Set status() to NORMAL */
+  void set_normal()
+  {
+    ut_d(const auto s=) zip.fix.fetch_and(~STATUS_MASK);
+    ut_ad(s >= UNFIXED);
+  }
+  /** Set status() to INIT_ON_FLUSH */
+  void set_inited() { set_normal(); zip.fix.fetch_add(INIT_ON_FLUSH); }
+  /** Set status() to IBUF_EXIST */
+  void set_ibuf_exist() { set_normal(); zip.fix.fetch_add(IBUF_EXIST); }
+  /** Set status() to FREED */
+  void set_freed()
+  {
+    ut_d(const auto s=) zip.fix.fetch_or(STATUS_MASK);
+    ut_ad(s >= UNFIXED);
+  }
 
   /** @return if this belongs to buf_pool.unzip_LRU */
   bool belongs_to_unzip_LRU() const
@@ -798,7 +817,7 @@ public:
   uint32_t fix(uint32_t count= 1)
   {
     ut_ad(count);
-    ut_ad(count < UNFIXED);
+    ut_ad(count < IBUF_EXIST);
     uint32_t f= zip.fix.fetch_add(count);
     ut_ad(f >= UNFIXED);
     ut_ad(!((f ^ (f + 1)) & LRU_MASK));
@@ -1999,7 +2018,7 @@ inline bool buf_page_t::can_relocate() const
   const auto f= state();
   ut_ad(f >= UNFIXED);
   ut_ad(in_LRU_list);
-  return f == UNFIXED;
+  return (~STATUS_MASK & f) == UNFIXED;
 }
 
 /** @return whether the block has been flagged old in buf_pool.LRU */

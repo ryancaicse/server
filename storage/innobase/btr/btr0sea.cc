@@ -1142,7 +1142,7 @@ got_no_latch:
 			goto fail_and_release_page;
 		}
 
-		DBUG_ASSERT(block->page.status != buf_page_t::FREED);
+		DBUG_ASSERT(block->page.status() != buf_page_t::FREED);
 	} else if (UNIV_UNLIKELY(index != block->index
 				 && index_id == block->index->id)) {
 		ut_a(block->index->freed());
@@ -1439,7 +1439,7 @@ void btr_search_drop_page_hash_when_freed(const page_id_t page_id)
 	if (block) {
 		/* If AHI is still valid, page can't be in free state.
 		AHI is dropped when page is freed. */
-		DBUG_ASSERT(block->page.status != buf_page_t::FREED);
+		DBUG_ASSERT(block->page.status() != buf_page_t::FREED);
 
 		if (block->index) {
 			/* In all our callers, the table handle should

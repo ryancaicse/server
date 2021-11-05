@@ -845,7 +845,7 @@ buf_block_t *btr_free_root_check(const page_id_t page_id, ulint zip_size,
                                        nullptr, BUF_GET_POSSIBLY_FREED, mtr);
 
   if (!block);
-  else if (block->page.status == buf_page_t::FREED)
+  else if (block->page.status() == buf_page_t::FREED)
     block= nullptr;
   else if (fil_page_index_page_check(block->page.frame) &&
            index_id == btr_page_get_index_id(block->page.frame))

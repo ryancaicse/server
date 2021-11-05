@@ -357,19 +357,18 @@ void buf_page_write_complete(const IORequest &request)
         request.node->space->purpose == FIL_TYPE_TEMPORARY*/);
   buf_page_t *bpage= request.bpage;
   ut_ad(bpage);
-  ut_ad(bpage->in_file());
-  /* bpage->io_fix() can only be cleared by buf_page_t::write_complete()
+  const auto state= bpage->state();
+  /* io-fix can only be cleared by buf_page_t::write_complete()
   and buf_page_t::read_complete() */
-  ut_ad(bpage->is_write_fixed());
+  ut_ad(state >= buf_page_t::WRITE_FIX);
   ut_ad(!buf_dblwr.is_inside(bpage->id()));
   ut_ad(request.node->space->id == bpage->id().space());
 
-  if (bpage->status == buf_page_t::INIT_ON_FLUSH)
-    bpage->status= buf_page_t::NORMAL;
+  if ((state & buf_page_t::STATUS_MASK) == buf_page_t::INIT_ON_FLUSH)
+    bpage->set_normal();
   else
   {
-    ut_ad(bpage->status == buf_page_t::NORMAL ||
-          bpage->status == buf_page_t::IBUF_EXIST);
+    ut_ad((state & buf_page_t::STATUS_MASK) != buf_page_t::FREED);
     if (request.node->space->use_doublewrite())
     {
       ut_ad(request.node->space != fil_system.temp_space);
@@ -640,7 +639,7 @@ a page is written to disk.
 static byte *buf_page_encrypt(fil_space_t* space, buf_page_t* bpage, byte* s,
                               buf_tmp_buffer_t **slot, size_t *size)
 {
-  ut_ad(bpage->status != buf_page_t::FREED);
+  ut_ad(bpage->status() != buf_page_t::FREED);
   ut_ad(space->id == bpage->id().space());
   ut_ad(!*slot);
 
@@ -764,9 +763,10 @@ not_compressed:
 /** Free a page whose underlying file page has been freed. */
 inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
 {
-  ut_ad(bpage->state() == buf_page_t::UNFIXED);
   mysql_mutex_assert_owner(&mutex);
-  bpage->status= buf_page_t::NORMAL;
+  ut_ad(bpage->state() == (buf_page_t::UNFIXED | buf_page_t::FREED));
+  bpage->set_state(buf_page_t::UNFIXED);
+
   mysql_mutex_lock(&flush_list_mutex);
   ut_d(const lsn_t oldest_modification= bpage->oldest_modification();)
   if (fsp_is_system_temporary(bpage->id().space()))
@@ -793,6 +793,7 @@ inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
 inline bool buf_page_t::flush(bool lru, fil_space_t *space)
 {
   ut_ad(in_file());
+  ut_ad(in_LRU_list);
   ut_ad((space->purpose == FIL_TYPE_TEMPORARY) ==
         (space == fil_system.temp_space));
   ut_ad(space->referenced());
@@ -801,14 +802,16 @@ inline bool buf_page_t::flush(bool lru, fil_space_t *space)
   if (!lock.u_lock_try(true))
     return false;
 
-  if (!ready_for_flush() || oldest_modification() < 2)
+  const auto s= state();
+  ut_a(s >= UNFIXED);
+
+  if (s >= READ_FIX || oldest_modification() < 2)
   {
-    ut_ad(frame || ready_for_flush());
     lock.u_unlock(true);
     return false;
   }
 
-  if (status == FREED)
+  if ((s & STATUS_MASK) == buf_page_t::FREED)
   {
     buf_pool.release_freed_page(this);
     mysql_mutex_unlock(&buf_pool.mutex);
@@ -901,9 +904,7 @@ inline bool buf_page_t::flush(bool lru, fil_space_t *space)
     write_frame= page;
   }
 
-  ut_ad(status == NORMAL || status == INIT_ON_FLUSH || status == IBUF_EXIST);
-
-  if (status == INIT_ON_FLUSH || !space->use_doublewrite())
+  if ((s & STATUS_MASK) == INIT_ON_FLUSH || !space->use_doublewrite())
   {
     if (UNIV_LIKELY(space->purpose == FIL_TYPE_TABLESPACE))
     {
@@ -1216,7 +1217,7 @@ static void buf_flush_discard_page(buf_page_t *bpage)
   while (bpage->is_io_fixed())
     (void) LF_BACKOFF();
 
-  bpage->status= buf_page_t::NORMAL;
+  bpage->set_normal();
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
   buf_pool.delete_from_flush_list(bpage);
   mysql_mutex_unlock(&buf_pool.flush_list_mutex);

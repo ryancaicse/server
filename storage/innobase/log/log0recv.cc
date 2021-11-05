@@ -997,8 +997,7 @@ public:
 				mysql_mutex_unlock(&recv_sys.mutex);
 				if (ibuf_page_exists(block->page.id(),
 						     block->zip_size())) {
-					block->page.status
-						= buf_page_t::IBUF_EXIST;
+					block->page.set_ibuf_exist();
 				}
 				mtr.commit();
 				mtr.start();
@@ -2741,7 +2740,7 @@ set_start_lsn:
 		any buffered changes. */
 		init->created = false;
 		ut_ad(!mtr.has_modifications());
-		block->page.status = buf_page_t::FREED;
+		block->page.set_freed();
 	}
 
 	/* Make sure that committing mtr does not change the modification

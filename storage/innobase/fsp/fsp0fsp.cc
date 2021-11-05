@@ -130,7 +130,7 @@ static buf_block_t *fsp_get_header(const fil_space_t *space, mtr_t *mtr)
   buf_block_t *block= buf_page_get_gen(page_id_t(space->id, 0),
                                        space->zip_size(), RW_SX_LATCH,
                                        nullptr, BUF_GET_POSSIBLY_FREED, mtr);
-  if (!block || block->page.status == buf_page_t::FREED)
+  if (!block || block->page.status() == buf_page_t::FREED)
     return nullptr;
   ut_ad(space->id == mach_read_from_4(FSP_HEADER_OFFSET + FSP_SPACE_ID +
                                       block->page.frame));
@@ -351,7 +351,7 @@ xdes_get_descriptor_with_space_hdr(
 		block = buf_page_get_gen(page_id_t(space->id, descr_page_no),
 					zip_size, RW_SX_LATCH, nullptr,
 					BUF_GET_POSSIBLY_FREED, mtr);
-		if (block && block->page.status == buf_page_t::FREED) {
+		if (block && block->page.status() == buf_page_t::FREED) {
 			block = nullptr;
 		}
 	}
@@ -385,7 +385,7 @@ static xdes_t *xdes_get_descriptor(const fil_space_t *space, page_no_t offset,
   buf_block_t *block= buf_page_get_gen(page_id_t(space->id, 0),
                                        space->zip_size(), RW_SX_LATCH,
                                        nullptr, BUF_GET_POSSIBLY_FREED, mtr);
-  if (!block || block->page.status == buf_page_t::FREED)
+  if (!block || block->page.status() == buf_page_t::FREED)
     return nullptr;
   return xdes_get_descriptor_with_space_hdr(block, space, offset, mtr, xdes);
 }
@@ -422,7 +422,7 @@ xdes_get_descriptor_const(
 						  nullptr,
 						  BUF_GET_POSSIBLY_FREED,
 						  mtr)) {
-		if (block->page.status == buf_page_t::FREED) {
+		if (block->page.status() == buf_page_t::FREED) {
 			return nullptr;
 		}
 
@@ -1457,7 +1457,7 @@ fsp_alloc_seg_inode(fil_space_t *space, buf_block_t *header,
 
 	block = buf_page_get_gen(page_id, space->zip_size(), RW_SX_LATCH,
 				 nullptr, BUF_GET_POSSIBLY_FREED, mtr);
-	if (!block || block->page.status == buf_page_t::FREED) {
+	if (!block || block->page.status() == buf_page_t::FREED) {
 		return nullptr;
 	}
 
