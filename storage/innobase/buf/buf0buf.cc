@@ -231,9 +231,9 @@ blocks for compressed pages (buf_page_t) and compressed page frames.
 First, a victim block for replacement has to be found in the
 buf_pool. It is taken from the free list or searched for from the
 end of the LRU-list. An exclusive lock is reserved for the frame,
-the io_fix field is set in the block fixing the block in buf_pool,
+the io_fix is set in the block fixing the block in buf_pool,
 and the io-operation for loading the page is queued. The io-handler thread
-releases the X-lock on the frame and resets the io_fix field
+releases the X-lock on the frame and releases the io_fix
 when the io operation completes.
 
 A thread may request the above operation using the function
@@ -2639,11 +2639,7 @@ got_block:
 	ut_ad(!block->page.in_zip_hash);
 	ut_ad(block->page.in_file());
 
-	switch (mode) {
-	default:
-		ut_ad(block->zip_size() == zip_size);
-		break;
-	case BUF_PEEK_IF_IN_POOL:
+	if (mode == BUF_PEEK_IF_IN_POOL) {
 		if (UNIV_UNLIKELY(!block->page.frame
 				  || block->page.is_read_fixed())) {
 			/* This mode is only used for dropping an
@@ -2654,29 +2650,20 @@ got_block:
 			block->unfix();
 			return nullptr;
 		}
-		break;
-	case BUF_GET_IF_IN_POOL:
-	case BUF_EVICT_IF_IN_POOL:
-		while (block->page.is_read_fixed()) {
-			/* The read-fix will be released after
-			block->page.lock in buf_page_t::read_complete() and
-			buf_pool_t::corrupted_evict(). */
-			block->page.lock.s_lock();
-			block->page.lock.s_unlock();
-		}
-		if (mode == BUF_EVICT_IF_IN_POOL) {
-			ut_ad(!block->page.oldest_modification());
-			mysql_mutex_lock(&buf_pool.mutex);
-			block->unfix();
+	} else if (mode == BUF_EVICT_IF_IN_POOL) {
+		ut_ad(!block->page.oldest_modification());
+		mysql_mutex_lock(&buf_pool.mutex);
+		block->unfix();
 
-			if (!buf_LRU_free_page(&block->page, true)) {
-				ut_ad(0);
-			}
-
-			mysql_mutex_unlock(&buf_pool.mutex);
-			return nullptr;
+		if (!buf_LRU_free_page(&block->page, true)) {
+			ut_ad(0);
 		}
+
+		mysql_mutex_unlock(&buf_pool.mutex);
+		return nullptr;
 	}
+
+	ut_ad(mode == BUF_GET_IF_IN_POOL || block->zip_size() == zip_size);
 
 	if (UNIV_UNLIKELY(!block->page.frame)) {
 		if (!block->page.lock.x_lock_try()) {
@@ -2687,7 +2674,7 @@ retry_page_zip:
 			goto loop;
 		}
 
-		if (UNIV_UNLIKELY(block->page.buf_fix_count() != 1)) {
+		if (block->page.state() != buf_page_t::UNFIXED + 1) {
 			block->page.lock.x_unlock();
 			goto retry_page_zip;
 		}
@@ -2753,7 +2740,7 @@ retry_page_zip:
 		access_time = block->page.is_accessed();
 
 		if (!access_time && !recv_no_ibuf_operations
-		    && ibuf_page_exists(block->page.id(), zip_size)) {
+		    && ibuf_page_exists(block->page.id(), block->zip_size())) {
 			block->page.ibuf_exist = true;
 		}
 
@@ -2777,9 +2764,6 @@ retry_page_zip:
 		--buf_pool.n_pend_unzip;
 	}
 
-	ut_ad(block->page.buf_fix_count());
-
-	ut_ad(block->page.in_file());
 	ut_ad(block->page.frame);
 
 #if defined UNIV_DEBUG || defined UNIV_IBUF_DEBUG
@@ -2830,6 +2814,7 @@ re_evict:
 #endif /* UNIV_DEBUG || UNIV_IBUF_DEBUG */
 
 	ut_ad(block->page.buf_fix_count());
+	ut_ad(block->page.in_file());
 
 	/* While tablespace is reinited the indexes are already freed but the
 	blocks related to it still resides in buffer pool. Trying to remove
@@ -2846,6 +2831,10 @@ re_evict:
 
 	if (mode != BUF_PEEK_IF_IN_POOL) {
 		buf_page_make_young_if_needed(&block->page);
+		if (!not_first_access) {
+			buf_read_ahead_linear(page_id, block->zip_size(),
+					      ibuf_inside(mtr));
+		}
 	}
 
 #ifdef UNIV_DEBUG
@@ -2853,14 +2842,6 @@ re_evict:
 #endif /* UNIV_DEBUG */
 	ut_ad(block->page.in_file());
 	ut_ad(block->page.frame);
-
-	while (block->page.is_read_fixed()) {
-		/* The read-fix will be released after
-		block->page.lock in buf_page_t::read_complete() and
-		buf_pool_t::corrupted_evict(). */
-		block->page.lock.s_lock();
-		block->page.lock.s_unlock();
-	}
 
 	ut_ad(block->page.id() == page_id);
 
@@ -2873,11 +2854,18 @@ re_evict:
 		if (block->page.ibuf_exist) {
 			block->page.ibuf_exist = false;
 			ibuf_merge_or_delete_for_page(block, page_id,
-						      zip_size);
+						      block->zip_size());
 		}
 
 		if (rw_latch == RW_X_LATCH) {
 			mtr->memo_push(block, MTR_MEMO_PAGE_X_FIX);
+			while (block->page.is_io_fixed()) {
+				/* The io-fix will be released after
+				block->page.lock in
+				buf_page_t::read_complete() and
+				buf_page_t::write_complete(). */
+				(void) LF_BACKOFF();
+			}
 		} else {
 			block->page.lock.x_unlock();
 			goto get_latch;
@@ -2885,13 +2873,6 @@ re_evict:
 	} else {
 get_latch:
 		mtr->page_lock(block, rw_latch);
-	}
-
-	if (!not_first_access && mode != BUF_PEEK_IF_IN_POOL) {
-		/* In the case of a first access, try to apply linear
-		read-ahead */
-
-		buf_read_ahead_linear(page_id, zip_size, ibuf_inside(mtr));
 	}
 
 	return block;

@@ -32,6 +32,7 @@ Created 11/26/1995 Heikki Tuuri
 #include "page0types.h"
 #include "mtr0log.h"
 #include "log0recv.h"
+#include "my_cpu.h"
 #ifdef BTR_CUR_HASH_ADAPT
 # include "btr0sea.h"
 #endif
@@ -1170,6 +1171,14 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
   {
   case RW_NO_LATCH:
     fix_type= MTR_MEMO_BUF_FIX;
+    while (block->page.is_io_fixed())
+    {
+      /* The io-fix will be released after block->page.lock in
+      buf_page_t::read_complete(), buf_pool_t::corrupted_evict(), and
+      buf_page_t::write_complete(). */
+      block->page.lock.s_lock();
+      block->page.lock.s_unlock();
+    }
     goto done;
   case RW_S_LATCH:
     fix_type= MTR_MEMO_PAGE_S_FIX;
@@ -1195,6 +1204,11 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
     if (index->freed())
       mtr_defer_drop_ahi(block, fix_type);
 #endif /* BTR_CUR_HASH_ADAPT */
+
+  while (block->page.is_io_fixed())
+    /* The io-fix will be released after block->page.lock in
+    buf_page_t::read_complete() and buf_page_t::write_complete(). */
+    (void) LF_BACKOFF();
 
 done:
   ut_ad(page_id_t(page_get_space_id(block->page.frame),
