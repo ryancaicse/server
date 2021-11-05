@@ -770,6 +770,9 @@ buf_LRU_add_block(
 /** Move a block to the start of the LRU list. */
 void buf_page_make_young(buf_page_t *bpage)
 {
+  if (bpage->is_read_fixed())
+    return;
+
   ut_ad(bpage->in_file());
 
   mysql_mutex_lock(&buf_pool.mutex);
