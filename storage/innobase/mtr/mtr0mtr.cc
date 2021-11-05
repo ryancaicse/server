@@ -484,8 +484,11 @@ struct Shrink
     case MTR_MEMO_PAGE_X_FIX:
     case MTR_MEMO_PAGE_SX_FIX:
       auto &bpage= static_cast<buf_block_t*>(slot->object)->page;
-      ut_ad(!bpage.io_fix());
-      const auto id= bpage.id();
+      ut_d(const auto s= bpage.state());
+      ut_ad(s > buf_page_t::UNFIXED);
+      ut_ad(s < buf_page_t::READ_FIX);
+      ut_ad(bpage.frame);
+      const auto id{bpage.id()};
       if (id < high)
       {
         ut_ad(id.space() == high.space() ||
@@ -494,8 +497,6 @@ struct Shrink
         break;
       }
       ut_ad(id.space() == high.space());
-      ut_ad(bpage.state() == BUF_BLOCK_LRU);
-      ut_ad(bpage.frame);
       if (bpage.oldest_modification() > 1)
         bpage.reset_oldest_modification();
       slot->type= static_cast<mtr_memo_type_t>(slot->type & ~MTR_MEMO_MODIFY);

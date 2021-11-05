@@ -73,19 +73,6 @@ extern my_bool	buf_disable_resize_buffer_pool_debug; /*!< if TRUE, resizing
 					buffer pool is not allowed. */
 # endif /* UNIV_DEBUG */
 
-/** buf_page_t::state() values, distinguishing buf_page_t and buf_block_t */
-enum buf_page_state
-{
-  /** available in buf_pool.free or buf_pool.watch */
-  BUF_BLOCK_NOT_USED= 0U << 28,
-  /** allocated for something else than a file page */
-  BUF_BLOCK_MEMORY= 1U << 28,
-  /** a previously allocated file page, in transit to NOT_USED */
-  BUF_BLOCK_REMOVE_HASH= 2U << 28,
-  /** a buf_block_t that is also in buf_pool.LRU */
-  BUF_BLOCK_LRU= 3U << 28
-};
-
 /** This structure defines information we will fetch from each buffer pool. It
 will be used to print table IO stats */
 struct buf_pool_info_t
@@ -169,7 +156,7 @@ operator<<(
 # define buf_pool_get_curr_size() srv_buf_pool_curr_size
 
 /** Allocate a buffer block.
-@return own: the allocated block, in state BUF_BLOCK_MEMORY */
+@return own: the allocated block, state()==MEMORY */
 inline buf_block_t *buf_block_alloc();
 /********************************************************************//**
 Frees a buffer block which does not contain a file page. */
@@ -579,10 +566,9 @@ public: // FIXME: fix fil_iterate()
   /** Page id. Protected by buf_pool.page_hash.lock_get() when
   the page is in buf_pool.page_hash. */
   page_id_t id_;
+  /** buf_pool.page_hash link; protected by buf_pool.page_hash.lock_get() */
+  buf_page_t *hash;
 private:
-  /** Count of how manyfold this block is currently bufferfixed. */
-  Atomic_counter<uint32_t> buf_fix_count_;
-
   /** log sequence number of the START of the log entry written of the
   oldest modification to this block which has not yet been written
   to the data file;
@@ -594,18 +580,24 @@ private:
   Atomic_relaxed<lsn_t> oldest_modification_;
 
 public:
-  /** read-fix flag in fix_count_raw() */
-  static constexpr uint32_t READ_FIX= 1U << 30;
-  /** write-fix flag in fix_count_raw() */
-  static constexpr uint32_t WRITE_FIX= 2U << 30;
-  /** io-fix mask in fix_count_raw() */
-  static constexpr uint32_t IO_FIX= 3U << 30;
-  /** lock covering frame */
+  /** state() of unused block (in buf_pool.free list) */
+  static constexpr uint32_t NOT_USED= 0;
+  /** state() of block allocated as general-purpose memory */
+  static constexpr uint32_t MEMORY= 1;
+  /** state() of block that is being freed */
+  static constexpr uint32_t REMOVE_HASH= 2;
+  /** smallest state() for a block that belongs to buf_pool.LRU */
+  static constexpr uint32_t UNFIXED= 1U << 30;
+  /** smallest state() for an io-fixed block */
+  static constexpr uint32_t READ_FIX= 2U << 30;
+  /** smallest state() for a write-fixed block */
+  static constexpr uint32_t WRITE_FIX= 3U << 30;
+  /** buf_pool.LRU status mask in state() */
+  static constexpr uint32_t LRU_MASK= WRITE_FIX;
+  /** lock covering the contents of frame */
   block_lock lock;
   /** pointer to aligned, uncompressed page frame of innodb_page_size */
   byte *frame;
-  /** buf_pool.page_hash link; protected by buf_pool.page_hash.lock_get() */
-  buf_page_t *hash;
   /* @} */
   /** ROW_FORMAT=COMPRESSED page; zip.data (but not the data it points to)
   is also protected by buf_pool.mutex;
@@ -621,20 +613,20 @@ public:
   /** whether this is in buf_pool.page_hash (in_file() holds);
   protected by buf_pool.mutex */
   bool in_page_hash;
-  /** whether this->list is in buf_pool.free (state() == BUF_BLOCK_NOT_USED);
+  /** whether this->list is in buf_pool.free (state() == NOT_USED);
   protected by buf_pool.flush_list_mutex */
   bool in_free_list;
 #endif /* UNIV_DEBUG */
   /** list member in one of the lists of buf_pool; protected by
   buf_pool.mutex or buf_pool.flush_list_mutex
 
-  state() == BUF_BLOCK_NOT_USED: buf_pool.free or buf_pool.withdraw
+  state() == NOT_USED: buf_pool.free or buf_pool.withdraw
 
   in_file() && oldest_modification():
   buf_pool.flush_list (protected by buf_pool.flush_list_mutex)
 
   The contents is undefined if in_file() && !oldest_modification(),
-  or if state() is BUF_BLOCK_MEMORY or BUF_BLOCK_REMOVE_HASH. */
+  or if state() == MEMORY or state() == REMOVE_HASH. */
   UT_LIST_NODE_T(buf_page_t) list;
 
 	/** @name LRU replacement algorithm fields.
@@ -658,7 +650,7 @@ public:
 					0 if the block was never accessed
 					in the buffer pool.
 
-					For state==BUF_BLOCK_MEMORY
+					For state() == MEMORY
 					blocks, this field can be repurposed
 					for something else.
 
@@ -683,17 +675,17 @@ public:
     FREED
   } status;
 
-  buf_page_t() : id_(0)
+  buf_page_t() : id_{0}
   {
-    static_assert(BUF_BLOCK_NOT_USED == 0, "compatibility");
+    static_assert(NOT_USED == 0, "compatibility");
     memset((void*) this, 0, sizeof *this);
   }
 
   buf_page_t(const buf_page_t &b) :
-    id_(b.id_), buf_fix_count_(b.buf_fix_count_),
+    id_(b.id_), hash(b.hash),
     oldest_modification_(b.oldest_modification_),
     lock() /* not copied */,
-    frame(b.frame), hash(b.hash), zip(b.zip),
+    frame(b.frame), zip(b.zip),
 #ifdef UNIV_DEBUG
     in_zip_hash(b.in_zip_hash), in_LRU_list(b.in_LRU_list),
     in_page_hash(b.in_page_hash), in_free_list(b.in_free_list),
@@ -704,19 +696,12 @@ public:
     lock.init();
   }
 
-  /** Initialize some fields */
-  void init(uint buf_fix_count= 0)
-  {
-  }
-
   /** Initialize some more fields */
-  void init(uint32_t buf_fix_count, page_id_t id)
+  void init(uint32_t state, page_id_t id)
   {
-    ut_ad(buf_fix_count == BUF_BLOCK_NOT_USED ||
-          buf_fix_count == BUF_BLOCK_MEMORY ||
-          (~IO_FIX & buf_fix_count) >= BUF_BLOCK_LRU);
+    ut_ad(state < REMOVE_HASH || state >= UNFIXED);
     id_= id;
-    buf_fix_count_= buf_fix_count;
+    zip.fix= state;
     oldest_modification_= 0;
     lock.init();
     ut_d(in_zip_hash= false);
@@ -732,21 +717,19 @@ public:
 
 public:
   const page_id_t &id() const { return id_; }
-  buf_page_state state() const
-  { return buf_page_state(buf_fix_count_ & BUF_BLOCK_LRU); }
-  uint32_t raw_fix_count() const { return buf_fix_count_; }
+  uint32_t state() const { return zip.fix; }
   uint32_t buf_fix_count() const
-  { return buf_fix_count_ & ~(IO_FIX | BUF_BLOCK_LRU); }
-  bool is_write_fixed() const { return buf_fix_count_ & WRITE_FIX; }
-  bool is_read_fixed() const { return buf_fix_count_ & READ_FIX; }
-  uint32_t io_fix() const { return buf_fix_count_ >> 30; }
+  { uint32_t f= state(); ut_ad(f & LRU_MASK); return ~LRU_MASK & f; }
+  bool is_io_fixed() const { return state() >= READ_FIX; }
+  bool is_write_fixed() const { return state() >= WRITE_FIX; }
+  bool is_read_fixed() const { return is_io_fixed() && !is_write_fixed(); }
 
   /** @return if this belongs to buf_pool.unzip_LRU */
   bool belongs_to_unzip_LRU() const
   { return UNIV_LIKELY_NULL(zip.data) && frame; }
 
   inline void add_buf_fix_count(uint32_t count);
-  inline void set_buf_fix_count(uint32_t count);
+  inline void set_state(uint32_t count);
   inline void set_corrupt_id();
 
   /** @return the log sequence number of the oldest pending modification
@@ -794,7 +777,7 @@ public:
   void set_temp_modified()
   {
     ut_ad(fsp_is_system_temporary(id().space()));
-    ut_ad(state() == BUF_BLOCK_LRU);
+    ut_ad(in_file());
     ut_ad(!oldest_modification());
     oldest_modification_= 2;
   }
@@ -802,18 +785,31 @@ public:
   /** Prepare to release a file page to buf_pool.free. */
   void free_file_page()
   {
-    ut_d(auto f=) buf_fix_count_-= (BUF_BLOCK_REMOVE_HASH - BUF_BLOCK_MEMORY);
-    ut_ad(f == BUF_BLOCK_MEMORY);
+    ut_ad((zip.fix.fetch_sub(REMOVE_HASH - MEMORY)) == REMOVE_HASH);
     /* buf_LRU_block_free_non_file_page() asserts !oldest_modification() */
     ut_d(oldest_modification_= 0;)
     id_= page_id_t(~0ULL);
   }
 
-  void fix() { buf_fix_count_++; }
+  void fix_on_recovery()
+  {
+    ut_d(const auto f=) zip.fix.fetch_sub(READ_FIX - UNFIXED - 1);
+    ut_ad(f >= READ_FIX);
+    ut_ad(f < WRITE_FIX);
+  }
+
+  void fix()
+  {
+    ut_d(const auto f=) zip.fix.fetch_add(1);
+    ut_ad(f >= UNFIXED);
+    ut_ad(!((f ^ (f + 1)) & LRU_MASK));
+  }
   uint32_t unfix()
   {
-    uint32_t count= buf_fix_count_--;
-    return count - 1;
+    uint32_t f= zip.fix.fetch_sub(1);
+    ut_ad(f > UNFIXED);
+    ut_ad(!((f ^ (f - 1)) & LRU_MASK));
+    return f - 1;
   }
 
   /** @return the physical size, in bytes */
@@ -839,7 +835,7 @@ public:
   }
 
   /** @return whether the block is mapped to a data file */
-  bool in_file() const { return state() == BUF_BLOCK_LRU; }
+  bool in_file() const { return state() >= UNFIXED; }
 
   /** @return whether the block is modified and ready for flushing */
   inline bool ready_for_flush() const;
@@ -876,11 +872,11 @@ struct buf_block_t{
 					to buf_page_t or buf_block_t */
 #ifdef UNIV_DEBUG
   /** whether page.list is in buf_pool.withdraw
-  ((state() == BUF_BLOCK_NOT_USED)) and the buffer pool is being shrunk;
+  ((state() == NOT_USED)) and the buffer pool is being shrunk;
   protected by buf_pool.mutex */
   bool in_withdraw_list;
   /** whether unzip_LRU is in buf_pool.unzip_LRU
-  (state() == BUF_BLOCK_LRU && frame && zip.data);
+  (in_file() && frame && zip.data);
   protected by buf_pool.mutex */
   bool in_unzip_LRU_list;
 #endif
@@ -924,9 +920,8 @@ struct buf_block_t{
 	These 5 fields may only be modified when:
 	we are holding the appropriate x-latch in btr_search_latches[], and
 	one of the following holds:
-	(1) state() == BUF_BLOCK_LRU, and we are holding lock in any mode, or
-	(2) buf_fix_count == 0, or
-	(3) state() == BUF_BLOCK_REMOVE_HASH.
+	(1) in_file(), and we are holding lock in any mode, or
+	(2) state()==WRITE_FIX||state()==UNFIXED||state()==REMOVE_HASH.
 
 	An exception to this is when we init or create a page
 	in the buffer pool in buf0buf.cc.
@@ -942,8 +937,8 @@ struct buf_block_t{
 
 	This implies that the fields may be read without race
 	condition whenever any of the following hold:
-	- the btr_search_latches[] s-latch or x-latch is being held, or
-	- the block state is not BUF_BLOCK_LRU or BUF_BLOCK_REMOVE_HASH,
+	- the btr_search_sys.partition[].latch is being held, or
+	- state() == NOT_USED || state() == MEMORY,
 	and holding some latch prevents the state from changing to that.
 
 	Some use of assert_block_ahi_empty() or assert_block_ahi_valid()
@@ -1004,8 +999,8 @@ struct buf_block_t{
   /** Initialize the block.
   @param page_id  page identifier
   @param zip_size ROW_FORMAT=COMPRESSED page size, or 0
-  @param fix      initial raw_fix_count() */
-  void initialise(const page_id_t page_id, ulint zip_size, uint32_t fix);
+  @param state    initial state() */
+  void initialise(const page_id_t page_id, ulint zip_size, uint32_t state);
 };
 
 /**********************************************************************//**
@@ -1418,16 +1413,10 @@ public:
     buf_page_t *bpage= page_hash.get(page_id, chain);
     if (bpage >= &watch[0] && bpage < &watch[UT_ARR_SIZE(watch)])
     {
-      ut_ad(bpage->state() == BUF_BLOCK_LRU);
       ut_ad(!bpage->in_zip_hash);
       ut_ad(!bpage->zip.data);
       if (!allow_watch)
         bpage= nullptr;
-    }
-    else if (bpage)
-    {
-      ut_ad(page_id == bpage->id());
-      ut_ad(bpage->in_file());
     }
     return bpage;
   }
@@ -1442,7 +1431,7 @@ public:
                 page_hash.lock_get(page_hash.cell_get(bpage.id().fold())).
                 is_locked());
 #endif /* SAFE_MUTEX */
-    ut_ad(bpage.state() == BUF_BLOCK_LRU);
+    ut_ad(bpage.in_file());
     if (&bpage < &watch[0] || &bpage >= &watch[array_elements(watch)])
       return false;
     ut_ad(!bpage.in_zip_hash);
@@ -1936,15 +1925,17 @@ inline void page_hash_latch::lock()
 inline void buf_page_t::add_buf_fix_count(uint32_t count)
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
-  ut_ad(count < WRITE_FIX);
-  buf_fix_count_+= count;
+  ut_ad(count < UNFIXED);
+  ut_d(auto f=) zip.fix.fetch_add(count);
+  ut_ad(!((f ^ (f + count)) & LRU_MASK));
 }
 
-inline void buf_page_t::set_buf_fix_count(uint32_t count)
+inline void buf_page_t::set_state(uint32_t count)
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
+  ut_ad(count <= REMOVE_HASH || count >= UNFIXED);
   ut_ad(count < READ_FIX);
-  buf_fix_count_= count;
+  zip.fix= count;
 }
 
 inline void buf_page_t::set_corrupt_id()
@@ -1961,16 +1952,12 @@ inline void buf_page_t::set_corrupt_id()
   default:
     ut_ad("block is dirty" == 0);
   }
-  switch (state()) {
-  case BUF_BLOCK_REMOVE_HASH:
-    break;
-  case BUF_BLOCK_LRU:
+  const auto f= state();
+  if (f != REMOVE_HASH)
+  {
+    ut_ad(f >= UNFIXED);
     ut_ad(buf_pool.page_hash.lock_get(buf_pool.page_hash.cell_get(id_.fold())).
           is_write_locked());
-    break;
-  case BUF_BLOCK_NOT_USED:
-  case BUF_BLOCK_MEMORY:
-    ut_ad("invalid state" == 0);
   }
 #endif
   id_= page_id_t(~0ULL);
@@ -1989,7 +1976,8 @@ inline void buf_page_t::set_oldest_modification(lsn_t lsn)
 inline void buf_page_t::clear_oldest_modification()
 {
   mysql_mutex_assert_owner(&buf_pool.flush_list_mutex);
-  ut_ad((state() & BUF_BLOCK_LRU) >= BUF_BLOCK_REMOVE_HASH);
+  ut_d(const auto s= state());
+  ut_ad(s >= UNFIXED || s == REMOVE_HASH);
   ut_ad(oldest_modification());
   ut_ad(!list.prev);
   ut_ad(!list.next);
@@ -2004,10 +1992,10 @@ inline bool buf_page_t::ready_for_flush() const
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
   ut_ad(in_LRU_list);
-  auto f= buf_fix_count_;
-  ut_a(!(~f & BUF_BLOCK_LRU));
+  const auto s= state();
+  ut_a(s >= UNFIXED);
   ut_ad(!fsp_is_system_temporary(id().space()) || oldest_modification() == 2);
-  return !(f & IO_FIX);
+  return s < READ_FIX;
 }
 
 /** @return whether the block can be relocated in memory.
@@ -2015,9 +2003,10 @@ The block can be dirty, but it must not be I/O-fixed or bufferfixed. */
 inline bool buf_page_t::can_relocate() const
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
-  ut_ad(in_file());
+  const auto f= state();
+  ut_ad(f >= UNFIXED);
   ut_ad(in_LRU_list);
-  return buf_fix_count_ == BUF_BLOCK_LRU;
+  return f == UNFIXED;
 }
 
 /** @return whether the block has been flagged old in buf_pool.LRU */
@@ -2079,31 +2068,25 @@ inline void buf_page_t::set_old(bool old)
 Let us list the consistency conditions for different control block states.
 
 NOT_USED:	is in free list, not LRU, not flush_list, nor page_hash
-MEMORY:		is not in free list, LRU list, flush_list, nor page_hash
-LRU:		is not in free list; id() is defined, is in page_hash
+MEMORY:		is not in any of free, LRU, flush_list, page_hash
+in_file():	is not in free list, is in LRU list, id() is defined,
+		is in page_hash (not necessarily if is_read_fixed())
 
 		is in buf_pool.flush_list, if and only
 		if oldest_modification == 1 || oldest_modification > 2
 
-		(1) if buf_fix_count() == 0, then
-			is in LRU list
-			is x-locked,
-				if and only if is_read_fixed()
-			is u-locked,
-				if and only if is_write_fixed()
-
-		(2) if buf_fix_count() > 0, then
-			is not in LRU list (??? FIXME)
-			if is_read_fixed(), is x-locked
-			if io_write_fixed(), is u-locked
+		(1) if is_write_fixed(): is u-locked
+		(2) if is_read_fixed(): is x-locked
 
 State transitions:
 
 NOT_USED => MEMORY
-MEMORY => LRU
 MEMORY => NOT_USED
-LRU => NOT_USED	NOTE: This transition is allowed if and only if
-				!fix_count_raw() && !oldest_modification().
+MEMORY => UNFIXED
+UNFIXED => in_file()
+in_file() => UNFIXED
+UNFIXED => REMOVE_HASH
+REMOVE_HASH => NOT_USED	(if and only if !oldest_modification())
 */
 
 /** Select from where to start a scan. If we have scanned

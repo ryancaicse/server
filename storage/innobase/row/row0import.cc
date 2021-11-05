@@ -4225,7 +4225,7 @@ fil_tablespace_iterate(
 	buf_block_t* block = reinterpret_cast<buf_block_t*>
 		(ut_zalloc_nokey(sizeof *block));
 	block->page.frame = page;
-	block->page.init(BUF_BLOCK_LRU + 1, page_id_t{~0ULL});
+	block->page.init(buf_page_t::UNFIXED + 1, page_id_t{~0ULL});
 
 	/* Read the first page and determine the page and zip size. */
 

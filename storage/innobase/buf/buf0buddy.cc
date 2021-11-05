@@ -354,11 +354,11 @@ buf_buddy_block_free(void* buf)
 	ut_a(!ut_align_offset(buf, srv_page_size));
 
 	HASH_SEARCH(hash, &buf_pool.zip_hash, fold, buf_page_t*, bpage,
-		    ut_ad(bpage->raw_fix_count() == BUF_BLOCK_MEMORY
+		    ut_ad(bpage->state() == buf_page_t::MEMORY
 			  && bpage->in_zip_hash),
 		    bpage->frame == buf);
 	ut_a(bpage);
-	ut_a(bpage->raw_fix_count() == BUF_BLOCK_MEMORY);
+	ut_a(bpage->state() == buf_page_t::MEMORY);
 	ut_ad(bpage->in_zip_hash);
 	ut_d(bpage->in_zip_hash = false);
 	HASH_DELETE(buf_page_t, hash, &buf_pool.zip_hash, fold, bpage);
@@ -383,7 +383,7 @@ buf_buddy_block_register(
 	buf_block_t*	block)	/*!< in: buffer frame to allocate */
 {
 	const ulint	fold = BUF_POOL_ZIP_FOLD(block);
-	ut_ad(block->page.state() == BUF_BLOCK_MEMORY);
+	ut_ad(block->page.state() == buf_page_t::MEMORY);
 
 	ut_a(block->page.frame);
 	ut_a(!ut_align_offset(block->page.frame, srv_page_size));

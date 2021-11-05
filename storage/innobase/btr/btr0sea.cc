@@ -931,15 +931,15 @@ inline void buf_pool_t::clear_hash_index()
         continue;
       }
 
-      ut_d(buf_page_state state= block->page.state());
+      ut_d(const auto s= block->page.state());
       /* Another thread may have set the state to
-      BUF_BLOCK_REMOVE_HASH in buf_LRU_block_remove_hashed().
+      REMOVE_HASH in buf_LRU_block_remove_hashed().
 
       The state change in buf_pool_t::realloc() is not observable
       here, because in that case we would have !block->index.
 
       In the end, the entire adaptive hash index will be removed. */
-      ut_ad(state == BUF_BLOCK_LRU || state == BUF_BLOCK_REMOVE_HASH);
+      ut_ad(s >= buf_page_t::UNFIXED || s == buf_page_t::REMOVE_HASH);
 # if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
       block->n_pointers= 0;
 # endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
@@ -979,10 +979,10 @@ inline buf_block_t* buf_pool_t::block_from_ahi(const byte *ptr) const
   block[n].frame == block->page.frame + n * srv_page_size.  Check it. */
   ut_ad(block->page.frame == page_align(ptr));
   /* Read the state of the block without holding hash_lock.
-  A state transition from BUF_BLOCK_LRU to
-  BUF_BLOCK_REMOVE_HASH is possible during this execution. */
-  ut_d(const buf_page_state state = block->page.state());
-  ut_ad(state == BUF_BLOCK_LRU || state == BUF_BLOCK_REMOVE_HASH);
+  A state transition from UNFIXED to REMOVE_HASH is possible during
+  this execution. */
+  ut_d(const auto s= block->page.state());
+  ut_ad(s >= buf_page_t::UNFIXED || s == buf_page_t::REMOVE_HASH);
   return block;
 }
 
@@ -1095,15 +1095,14 @@ fail:
 			transactional_shared_lock_guard<page_hash_latch> g{
 				buf_pool.page_hash.lock_get(chain)};
 
-			switch (block->page.state()) {
-			case BUF_BLOCK_REMOVE_HASH:
+			const auto state = block->page.state();
+			if (state == buf_page_t::REMOVE_HASH) {
 				/* Another thread is just freeing the block
 				from the LRU list of the buffer pool: do not
 				try to access this page. */
 				goto fail;
-			case BUF_BLOCK_LRU:
-				break;
-			default:
+			}
+			if (UNIV_UNLIKELY(state < buf_page_t::UNFIXED)) {
 #ifndef NO_ELISION
 				xend();
 #endif
@@ -1150,8 +1149,8 @@ got_no_latch:
 		goto fail_and_release_page;
 	}
 
-	if (block->page.state() != BUF_BLOCK_LRU) {
-		ut_ad(block->page.state() == BUF_BLOCK_REMOVE_HASH);
+	if (!block->page.in_file()) {
+		ut_ad(block->page.state() == buf_page_t::REMOVE_HASH);
 
 fail_and_release_page:
 		if (!ahi_latch) {
@@ -1264,8 +1263,11 @@ retry:
 		return;
 	}
 
-	ut_ad(!block->page.buf_fix_count()
-	      || block->page.state() == BUF_BLOCK_REMOVE_HASH
+	ut_d(const auto state = block->page.state());
+	ut_ad(state == buf_page_t::REMOVE_HASH
+	      || state >= buf_page_t::UNFIXED);
+	ut_ad(state == buf_page_t::REMOVE_HASH
+	      || !(~buf_page_t::LRU_MASK & state)
 	      || block->page.lock.have_any());
 	ut_ad(page_is_leaf(block->page.frame));
 
@@ -2206,7 +2208,7 @@ btr_search_hash_table_validate(ulint hash_table_id)
 				= buf_pool.block_from_ahi((byte*) node->data);
 			index_id_t		page_index_id;
 
-			if (UNIV_LIKELY(block->page.state() == BUF_BLOCK_LRU)) {
+			if (UNIV_LIKELY(block->page.in_file())) {
 				/* The space and offset are only valid
 				for file blocks.  It is possible that
 				the block is being freed
@@ -2227,7 +2229,7 @@ btr_search_hash_table_validate(ulint hash_table_id)
 			the block from buf_pool.page_hash by calling
 			buf_LRU_block_remove_hashed_page(). Then it
 			invokes btr_search_drop_page_hash_index(). */
-			ut_a(block->page.state() == BUF_BLOCK_REMOVE_HASH);
+			ut_a(block->page.state() == buf_page_t::REMOVE_HASH);
 state_ok:
 			ut_ad(!dict_index_is_ibuf(block->index));
 			ut_ad(block->page.id().space()

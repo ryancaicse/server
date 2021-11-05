@@ -61,7 +61,7 @@ inline void buf_pool_t::watch_remove(buf_page_t *watch,
   if (watch->buf_fix_count())
     page_hash.remove(chain, watch);
   ut_ad(!watch->in_page_hash);
-  watch->set_buf_fix_count(BUF_BLOCK_NOT_USED);
+  watch->set_state(buf_page_t::NOT_USED);
   watch->id_= page_id_t(~0ULL);
 }
 
@@ -106,7 +106,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
   if (!zip_size || unzip || recv_recovery_is_on())
   {
     block= buf_LRU_get_free_block(false);
-    block->initialise(page_id, zip_size, BUF_BLOCK_LRU | buf_page_t::READ_FIX);
+    block->initialise(page_id, zip_size, buf_page_t::READ_FIX);
     /* x_unlock() will be invoked
     in buf_page_t::read_complete() by the io-handler thread. */
     block->page.lock.x_lock(true);
@@ -123,7 +123,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     if (block)
     {
       block->page.lock.x_unlock(true);
-      ut_d(block->page.set_buf_fix_count(BUF_BLOCK_MEMORY));
+      ut_d(block->page.set_state(buf_page_t::MEMORY));
       buf_LRU_block_free_non_file_page(block);
     }
     goto func_exit;
@@ -141,11 +141,11 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
       if (hash_page)
       {
         /* Preserve the reference count. */
-        uint32_t buf_fix_count= hash_page->raw_fix_count() - BUF_BLOCK_LRU;
-        ut_a(buf_fix_count);
+        uint32_t buf_fix_count= hash_page->state();
+        ut_a(buf_fix_count >= buf_page_t::UNFIXED);
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
         buf_pool.watch_remove(hash_page, chain);
-        block->page.add_buf_fix_count(buf_fix_count);
+        block->page.add_buf_fix_count(buf_fix_count - buf_page_t::UNFIXED);
       }
 
       buf_pool.page_hash.append(chain, &block->page);
@@ -201,7 +201,7 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
     page_zip_set_size(&bpage->zip, zip_size);
     bpage->zip.data = (page_zip_t*) data;
 
-    bpage->init(BUF_BLOCK_LRU | buf_page_t::READ_FIX, page_id);
+    bpage->init(buf_page_t::READ_FIX, page_id);
     bpage->lock.x_lock(true);
 
     {
@@ -213,9 +213,10 @@ static buf_page_t* buf_page_init_for_read(ulint mode, const page_id_t page_id,
         /* Preserve the reference count. It can be 0 if
         buf_pool_t::watch_unset() is executing concurrently,
         waiting for buf_pool.mutex, which we are holding. */
-        uint32_t buf_fix_count= hash_page->raw_fix_count() - BUF_BLOCK_LRU;
+        uint32_t buf_fix_count= hash_page->state();
+        ut_a(buf_fix_count >= buf_page_t::UNFIXED);
         ut_a(buf_fix_count < buf_page_t::READ_FIX);
-        bpage->add_buf_fix_count(buf_fix_count);
+        bpage->add_buf_fix_count(buf_fix_count - buf_page_t::UNFIXED);
         buf_pool.watch_remove(hash_page, chain);
       }
 

@@ -117,7 +117,7 @@ struct buf_page_info_t{
 	/** page identifier */
 	page_id_t	id;
 	uint32_t	access_time;	/*!< Time of first access */
-	uint32_t	raw_fix_count;	/*!< buf_page_t::raw_fix_count() */
+	uint32_t	state;		/*!< buf_page_t::state() */
 #ifdef BTR_CUR_HASH_ADAPT
 	unsigned	hashed:1;	/*!< Whether hash index has been
 					built on this page */
@@ -3941,8 +3941,7 @@ i_s_innodb_buffer_page_fill(
 		OK(fields[IDX_BUFFER_PAGE_FLUSH_TYPE]->store(0, true));
 
 		OK(fields[IDX_BUFFER_PAGE_FIX_COUNT]->store(
-			   ~(buf_page_t::IO_FIX | BUF_BLOCK_LRU)
-			   & page_info->raw_fix_count, true));
+			   ~buf_page_t::LRU_MASK & page_info->state, true));
 
 #ifdef BTR_CUR_HASH_ADAPT
 		OK(fields[IDX_BUFFER_PAGE_HASHED]->store(
@@ -4015,13 +4014,19 @@ i_s_innodb_buffer_page_fill(
 			   ? (UNIV_ZIP_SIZE_MIN >> 1) << page_info->zip_ssize
 			   : 0, true));
 
+		static_assert(buf_page_t::NOT_USED == 0, "compatibility");
+		static_assert(buf_page_t::MEMORY == 1, "compatibility");
+		static_assert(buf_page_t::REMOVE_HASH == 2, "compatibility");
+
 		OK(fields[IDX_BUFFER_PAGE_STATE]->store(
-			   ((BUF_BLOCK_LRU & page_info->raw_fix_count) >> 28)
-			   + 1, true));
+			   std::min<uint32_t>(3, page_info->state) + 1, true));
+
+		static_assert(buf_page_t::UNFIXED == 1U << 30, "comp.");
+		static_assert(buf_page_t::READ_FIX == 2U << 30, "comp.");
+		static_assert(buf_page_t::WRITE_FIX == 3U << 30, "comp.");
 
 		OK(fields[IDX_BUFFER_PAGE_IO_FIX]->store(
-			   ((buf_page_t::IO_FIX & page_info->raw_fix_count)
-			    >> 30) + 1, true));
+			   std::min(1U, page_info->state >> 30), true));
 
 		OK(fields[IDX_BUFFER_PAGE_IS_OLD]->store(
 			   page_info->is_old, true));
@@ -4105,14 +4110,16 @@ i_s_innodb_buffer_page_get_info(
 {
 	page_info->block_id = pos;
 
-	static_assert(BUF_BLOCK_NOT_USED == 0, "compatibility");
-	static_assert(BUF_BLOCK_MEMORY == 1U << 28, "compatibility");
-	static_assert(BUF_BLOCK_REMOVE_HASH == 2U << 28, "compatibility");
-	static_assert(BUF_BLOCK_LRU == 3U << 28, "compatibility");
+	static_assert(buf_page_t::NOT_USED == 0, "compatibility");
+	static_assert(buf_page_t::MEMORY == 1, "compatibility");
+	static_assert(buf_page_t::REMOVE_HASH == 2, "compatibility");
+	static_assert(buf_page_t::UNFIXED == 1U << 30, "compatibility");
+	static_assert(buf_page_t::READ_FIX == 2U << 30, "compatibility");
+	static_assert(buf_page_t::WRITE_FIX == 3U << 30, "compatibility");
 
-	page_info->raw_fix_count = bpage->raw_fix_count();
+	page_info->state = bpage->state();
 
-	if (~page_info->raw_fix_count & BUF_BLOCK_LRU) {
+	if (page_info->state < buf_page_t::UNFIXED) {
 		page_info->page_type = I_S_PAGE_TYPE_UNKNOWN;
 		page_info->compressed_only = false;
 	} else {
@@ -4130,7 +4137,8 @@ i_s_innodb_buffer_page_get_info(
 
 		page_info->freed_page_clock = bpage->freed_page_clock;
 
-		if (bpage->is_read_fixed()) {
+		if (page_info->state >= buf_page_t::READ_FIX
+		    && page_info->state < buf_page_t::WRITE_FIX) {
 			page_info->page_type = I_S_PAGE_TYPE_UNKNOWN;
 			page_info->newest_mod = 0;
 			return;
@@ -4433,8 +4441,7 @@ i_s_innodb_buf_page_lru_fill(
 		OK(fields[IDX_BUF_LRU_PAGE_FLUSH_TYPE]->store(0, true));
 
 		OK(fields[IDX_BUF_LRU_PAGE_FIX_COUNT]->store(
-			   ~(buf_page_t::IO_FIX | BUF_BLOCK_LRU)
-			   & page_info->raw_fix_count, true));
+			   ~buf_page_t::LRU_MASK & page_info->state, true));
 
 #ifdef BTR_CUR_HASH_ADAPT
 		OK(fields[IDX_BUF_LRU_PAGE_HASHED]->store(
@@ -4509,9 +4516,12 @@ i_s_innodb_buf_page_lru_fill(
 		OK(fields[IDX_BUF_LRU_PAGE_STATE]->store(
 			   page_info->compressed_only, true));
 
+		static_assert(buf_page_t::UNFIXED == 1U << 30, "comp.");
+		static_assert(buf_page_t::READ_FIX == 2U << 30, "comp.");
+		static_assert(buf_page_t::WRITE_FIX == 3U << 30, "comp.");
+
 		OK(fields[IDX_BUF_LRU_PAGE_IO_FIX]->store(
-			   ((buf_page_t::IO_FIX & page_info->raw_fix_count)
-			    >> 30) + 1, true));
+			   std::min(1U, page_info->state >> 30), true));
 
 		OK(fields[IDX_BUF_LRU_PAGE_IS_OLD]->store(
 			   page_info->is_old, true));

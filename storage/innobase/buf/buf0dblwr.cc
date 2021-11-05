@@ -520,7 +520,7 @@ static void buf_dblwr_check_page_lsn(const buf_page_t &b, const byte *page)
 /** Check the LSN values on the page with which this block is associated. */
 static void buf_dblwr_check_block(const buf_page_t *bpage)
 {
-  ut_ad(bpage->state() == BUF_BLOCK_LRU);
+  ut_ad(bpage->in_file());
   const page_t *page= bpage->frame;
   ut_ad(page);
 

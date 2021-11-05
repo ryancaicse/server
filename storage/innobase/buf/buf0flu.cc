@@ -239,14 +239,15 @@ void buf_flush_remove_pages(ulint id)
 
     for (buf_page_t *bpage= UT_LIST_GET_LAST(buf_pool.flush_list); bpage; )
     {
-      ut_d(const auto s= bpage->state());
-      ut_ad(s == BUF_BLOCK_LRU || s == BUF_BLOCK_REMOVE_HASH);
+      const auto s= bpage->state();
+      ut_ad(s >= buf_page_t::UNFIXED || s == buf_page_t::REMOVE_HASH);
+      ut_ad(s < buf_page_t::READ_FIX || s >= buf_page_t::WRITE_FIX);
       buf_page_t *prev= UT_LIST_GET_PREV(list, bpage);
 
       const page_id_t bpage_id(bpage->id());
 
       if (bpage_id < first || bpage_id >= end);
-      else if (bpage->io_fix())
+      else if (s >= buf_page_t::WRITE_FIX)
         deferred= true;
       else
         buf_pool.delete_from_flush_list(bpage);
@@ -343,8 +344,8 @@ inline void buf_page_t::write_complete(bool temporary)
     oldest_modification_.store(1, std::memory_order_release);
   }
   lock.u_unlock(true);
-  ut_d(auto f=) buf_fix_count_-= WRITE_FIX;
-  ut_ad(f < READ_FIX);
+  ut_d(auto f=) zip.fix.fetch_sub(WRITE_FIX - UNFIXED);
+  ut_ad(f >= WRITE_FIX);
 }
 
 /** Complete write of a file page from buf_pool.
@@ -762,7 +763,7 @@ not_compressed:
 /** Free a page whose underlying file page has been freed. */
 inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
 {
-  ut_ad(bpage->in_file());
+  ut_ad(bpage->state() == buf_page_t::UNFIXED);
   mysql_mutex_assert_owner(&mutex);
   bpage->status= buf_page_t::NORMAL;
   mysql_mutex_lock(&flush_list_mutex);
@@ -779,7 +780,6 @@ inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
   }
   bpage->clear_oldest_modification();
   mysql_mutex_unlock(&flush_list_mutex);
-  ut_ad(!bpage->io_fix());
   bpage->lock.u_unlock(true);
 
   buf_LRU_free_page(bpage, true);
@@ -823,8 +823,9 @@ inline bool buf_page_t::flush(bool lru, fil_space_t *space)
   DBUG_PRINT("ib_buf", ("%s %u page %u:%u",
                         lru ? "LRU" : "flush_list",
                         id().space(), id().page_no()));
-  ut_d(const auto f=) buf_fix_count_+= WRITE_FIX;
-  ut_ad((f & IO_FIX) == WRITE_FIX);
+  ut_d(const auto f=) zip.fix.fetch_add(WRITE_FIX - UNFIXED);
+  ut_ad(f >= UNFIXED);
+  ut_ad(f < READ_FIX);
   ut_ad(space == fil_system.temp_space
         ? oldest_modification() == 2
         : oldest_modification() > 2);
@@ -1380,7 +1381,6 @@ static ulint buf_do_flush_list_batch(ulint max_n, lsn_t lsn)
     }
 
     ut_ad(oldest_modification > 2);
-    ut_ad(bpage->in_file());
 
     if (!bpage->ready_for_flush())
       goto skip;
@@ -1535,8 +1535,6 @@ bool buf_flush_list_space(fil_space_t *space, ulint *n_flushed)
 
   for (buf_page_t *bpage= UT_LIST_GET_LAST(buf_pool.flush_list); bpage; )
   {
-    ut_d(const auto s= bpage->state());
-    ut_ad(s == BUF_BLOCK_LRU || s == BUF_BLOCK_REMOVE_HASH);
     ut_ad(bpage->oldest_modification());
     ut_ad(bpage->in_file());
 
@@ -2467,7 +2465,8 @@ static void buf_flush_validate_low()
 		in the flush list waiting to acquire the
 		buf_pool.flush_list_mutex to complete the relocation. */
 		ut_d(const auto s= bpage->state());
-		ut_ad(s == BUF_BLOCK_LRU || s == BUF_BLOCK_REMOVE_HASH);
+		ut_ad(s >= buf_page_t::UNFIXED
+		      || s == buf_page_t::REMOVE_HASH);
 		ut_ad(om == 1 || om > 2);
 
 		bpage = UT_LIST_GET_NEXT(list, bpage);

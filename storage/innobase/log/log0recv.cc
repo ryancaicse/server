@@ -1296,7 +1296,7 @@ inline void recv_sys_t::clear()
   for (buf_block_t *block= UT_LIST_GET_LAST(blocks); block; )
   {
     buf_block_t *prev_block= UT_LIST_GET_PREV(unzip_LRU, block);
-    ut_ad(block->page.state() == BUF_BLOCK_MEMORY);
+    ut_ad(block->page.state() == buf_page_t::MEMORY);
     UT_LIST_REMOVE(blocks, block);
     MEM_MAKE_ADDRESSABLE(block->page.frame, srv_page_size);
     buf_block_free(block);
@@ -1385,7 +1385,7 @@ inline void recv_sys_t::free(const void *data)
       continue;
     buf_block_t *block= &chunk->blocks[offs];
     ut_ad(block->page.frame == data);
-    ut_ad(block->page.state() == BUF_BLOCK_MEMORY);
+    ut_ad(block->page.state() == buf_page_t::MEMORY);
     ut_ad(static_cast<uint16_t>(block->page.access_time - 1) <
           srv_page_size);
     ut_ad(block->page.access_time >= 1U << 16);
@@ -2816,15 +2816,14 @@ void recv_recover_page(fil_space_t* space, buf_page_t* bpage)
 	mtr.start();
 	mtr.set_log_mode(MTR_LOG_NO_REDO);
 
-	ut_ad(bpage->state() == BUF_BLOCK_LRU);
 	ut_ad(bpage->frame);
-	bpage->fix();
 	/* Move the ownership of the x-latch on the page to
 	this OS thread, so that we can acquire a second
 	x-latch on it.  This is needed for the operations to
 	the page to pass the debug checks. */
 	bpage->lock.claim_ownership();
 	bpage->lock.x_lock_recursive();
+	bpage->fix_on_recovery();
 	mtr.memo_push(reinterpret_cast<buf_block_t*>(bpage),
 		      MTR_MEMO_PAGE_X_FIX);
 
