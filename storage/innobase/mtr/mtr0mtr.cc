@@ -489,7 +489,7 @@ struct Shrink
       ut_ad(s > buf_page_t::UNFIXED);
       ut_ad(s < buf_page_t::READ_FIX);
       ut_ad(bpage.frame);
-      const auto id{bpage.id()};
+      const page_id_t id{bpage.id()};
       if (id < high)
       {
         ut_ad(id.space() == high.space() ||
