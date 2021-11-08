@@ -961,7 +961,7 @@ fil_crypt_read_crypt_data(fil_space_t* space)
 						  nullptr,
 						  BUF_GET_POSSIBLY_FREED,
 						  &mtr)) {
-		if (block->page.status() == buf_page_t::FREED) {
+		if (block->page.is_freed()) {
 			goto func_exit;
 		}
 		mysql_mutex_lock(&fil_system.mutex);
@@ -1024,7 +1024,7 @@ func_exit:
 		    page_id_t(space->id, 0), space->zip_size(),
 		    RW_X_LATCH, NULL, BUF_GET_POSSIBLY_FREED,
 		    &mtr, &err)) {
-		if (block->page.status() == buf_page_t::FREED) {
+		if (block->page.is_freed()) {
 			goto abort;
 		}
 
@@ -1816,7 +1816,7 @@ fil_crypt_rotate_page(
 		const lsn_t block_lsn = mach_read_from_8(FIL_PAGE_LSN + frame);
 		uint kv = buf_page_get_key_version(frame, space->flags);
 
-		if (block->page.status() == buf_page_t::FREED) {
+		if (block->page.is_freed()) {
 			/* Do not modify freed pages to avoid an assertion
 			failure on recovery.*/
 		} else if (block->page.oldest_modification() > 1) {
@@ -1996,7 +1996,7 @@ fil_crypt_flush_space(
 	if (buf_block_t* block = buf_page_get_gen(
 		    page_id_t(space->id, 0), space->zip_size(),
 		    RW_X_LATCH, NULL, BUF_GET_POSSIBLY_FREED, &mtr)) {
-		if (block->page.status() != buf_page_t::FREED) {
+		if (block->page.is_freed()) {
 			mtr.set_named_space(space);
 			crypt_data->write_page0(block, &mtr);
 		}

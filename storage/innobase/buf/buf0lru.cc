@@ -795,12 +795,10 @@ The caller must hold buf_pool.mutex.
 @retval false if the page was not freed */
 bool buf_LRU_free_page(buf_page_t *bpage, bool zip)
 {
-	const page_id_t id(bpage->id());
+	const page_id_t id{bpage->id()};
 	buf_page_t*	b = nullptr;
 
 	mysql_mutex_assert_owner(&buf_pool.mutex);
-	ut_ad(bpage->in_file());
-	ut_ad(bpage->in_LRU_list);
 
 	/* First, perform a quick check before we acquire hash_lock. */
 	if (!bpage->can_relocate()) {
@@ -856,8 +854,6 @@ func_exit:
 	}
 
 	mysql_mutex_assert_owner(&buf_pool.mutex);
-	ut_ad(bpage->in_file());
-	ut_ad(bpage->in_LRU_list);
 
 	DBUG_PRINT("ib_buf", ("free page %u:%u",
 			      id.space(), id.page_no()));

@@ -240,7 +240,7 @@ void buf_flush_remove_pages(ulint id)
     for (buf_page_t *bpage= UT_LIST_GET_LAST(buf_pool.flush_list); bpage; )
     {
       const auto s= bpage->state();
-      ut_ad(s >= buf_page_t::UNFIXED || s == buf_page_t::REMOVE_HASH);
+      ut_ad(s >= buf_page_t::REMOVE_HASH);
       ut_ad(s < buf_page_t::READ_FIX || s >= buf_page_t::WRITE_FIX);
       buf_page_t *prev= UT_LIST_GET_PREV(list, bpage);
 
@@ -344,8 +344,11 @@ inline void buf_page_t::write_complete(bool temporary)
     oldest_modification_.store(1, std::memory_order_release);
   }
   lock.u_unlock(true);
-  ut_d(auto f=) zip.fix.fetch_sub(WRITE_FIX - UNFIXED);
-  ut_ad(f >= WRITE_FIX);
+  const auto s= state();
+  ut_ad(s >= WRITE_FIX);
+  zip.fix.fetch_sub((s >= WRITE_FIX_REINIT)
+                    ? (WRITE_FIX_REINIT - UNFIXED)
+                    : (WRITE_FIX - UNFIXED));
 }
 
 /** Complete write of a file page from buf_pool.
@@ -364,16 +367,11 @@ void buf_page_write_complete(const IORequest &request)
   ut_ad(!buf_dblwr.is_inside(bpage->id()));
   ut_ad(request.node->space->id == bpage->id().space());
 
-  if ((state & buf_page_t::STATUS_MASK) == buf_page_t::INIT_ON_FLUSH)
-    bpage->set_normal();
-  else
+  if (state < buf_page_t::WRITE_FIX_REINIT &&
+      request.node->space->use_doublewrite())
   {
-    ut_ad((state & buf_page_t::STATUS_MASK) != buf_page_t::FREED);
-    if (request.node->space->use_doublewrite())
-    {
-      ut_ad(request.node->space != fil_system.temp_space);
-      buf_dblwr.write_completed();
-    }
+    ut_ad(request.node->space != fil_system.temp_space);
+    buf_dblwr.write_completed();
   }
 
   if (request.slot)
@@ -639,7 +637,7 @@ a page is written to disk.
 static byte *buf_page_encrypt(fil_space_t* space, buf_page_t* bpage, byte* s,
                               buf_tmp_buffer_t **slot, size_t *size)
 {
-  ut_ad(bpage->status() != buf_page_t::FREED);
+  ut_ad(!bpage->is_freed());
   ut_ad(space->id == bpage->id().space());
   ut_ad(!*slot);
 
@@ -764,7 +762,7 @@ not_compressed:
 inline void buf_pool_t::release_freed_page(buf_page_t *bpage)
 {
   mysql_mutex_assert_owner(&mutex);
-  ut_ad(bpage->state() == (buf_page_t::UNFIXED | buf_page_t::FREED));
+  ut_ad(bpage->state() == buf_page_t::FREED);
   bpage->set_state(buf_page_t::UNFIXED);
 
   mysql_mutex_lock(&flush_list_mutex);
@@ -803,19 +801,19 @@ inline bool buf_page_t::flush(bool lru, fil_space_t *space)
     return false;
 
   const auto s= state();
-  ut_a(s >= UNFIXED);
+  ut_a(s >= FREED);
+
+  if (s < UNFIXED)
+  {
+    buf_pool.release_freed_page(this);
+    mysql_mutex_unlock(&buf_pool.mutex);
+    return true;
+  }
 
   if (s >= READ_FIX || oldest_modification() < 2)
   {
     lock.u_unlock(true);
     return false;
-  }
-
-  if ((s & STATUS_MASK) == buf_page_t::FREED)
-  {
-    buf_pool.release_freed_page(this);
-    mysql_mutex_unlock(&buf_pool.mutex);
-    return true;
   }
 
   mysql_mutex_assert_not_owner(&buf_pool.flush_list_mutex);
@@ -904,8 +902,9 @@ inline bool buf_page_t::flush(bool lru, fil_space_t *space)
     write_frame= page;
   }
 
-  if ((s & STATUS_MASK) == INIT_ON_FLUSH || !space->use_doublewrite())
+  if ((s & LRU_MASK) == REINIT || !space->use_doublewrite())
   {
+    // FIXME: change status to WRITE_FIX or WRITE_FIX_IBUF
     if (UNIV_LIKELY(space->purpose == FIL_TYPE_TABLESPACE))
     {
       const lsn_t lsn=
@@ -1214,14 +1213,15 @@ static void buf_flush_discard_page(buf_page_t *bpage)
   if (!bpage->lock.u_lock_try(false))
     return;
 
-  while (bpage->is_io_fixed())
-    (void) LF_BACKOFF();
+  bpage->wait_for_io_unfix();
 
-  bpage->set_normal();
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
   buf_pool.delete_from_flush_list(bpage);
   mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
+  ut_d(const auto state= bpage->state());
+  ut_ad(state == buf_page_t::FREED || state == buf_page_t::UNFIXED ||
+        state == buf_page_t::IBUF_EXIST || state == buf_page_t::REINIT);
   bpage->lock.u_unlock();
 
   buf_LRU_free_page(bpage, true);
@@ -1254,15 +1254,19 @@ static void buf_flush_LRU_list_batch(ulint max, flush_counters_t *n)
     buf_page_t *prev= UT_LIST_GET_PREV(LRU, bpage);
     const lsn_t oldest_modification= bpage->oldest_modification();
     buf_pool.lru_hp.set(prev);
+    const auto state= bpage->state();
+    ut_ad(state >= buf_page_t::FREED);
+    ut_ad(bpage->in_LRU_list);
 
-    if (oldest_modification <= 1 && bpage->can_relocate())
+    if (oldest_modification <= 1)
     {
-      /* block is ready for eviction i.e., it is clean and is not
-      IO-fixed or buffer fixed. */
+      if (state != buf_page_t::FREED &&
+          (state >= buf_page_t::READ_FIX || (~buf_page_t::LRU_MASK & state)))
+        goto must_skip;
       if (buf_LRU_free_page(bpage, true))
         ++n->evicted;
     }
-    else if (oldest_modification > 1 && bpage->ready_for_flush())
+    else if (state < buf_page_t::READ_FIX)
     {
       /* Block is ready for flush. Dispatch an IO request. The IO
       helper thread will put it on free list in IO completion routine. */
@@ -1303,6 +1307,7 @@ reacquire_mutex:
       }
     }
     else
+    must_skip:
       /* Can't evict or dispatch this block. Go to previous. */
       ut_ad(buf_pool.lru_hp.is_hp(prev));
     bpage= buf_pool.lru_hp.get();
@@ -2471,8 +2476,7 @@ static void buf_flush_validate_low()
 		in the flush list waiting to acquire the
 		buf_pool.flush_list_mutex to complete the relocation. */
 		ut_d(const auto s= bpage->state());
-		ut_ad(s >= buf_page_t::UNFIXED
-		      || s == buf_page_t::REMOVE_HASH);
+		ut_ad(s >= buf_page_t::REMOVE_HASH);
 		ut_ad(om == 1 || om > 2);
 
 		bpage = UT_LIST_GET_NEXT(list, bpage);

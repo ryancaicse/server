@@ -4021,12 +4021,20 @@ i_s_innodb_buffer_page_fill(
 		OK(fields[IDX_BUFFER_PAGE_STATE]->store(
 			   std::min<uint32_t>(3, page_info->state) + 1, true));
 
-		static_assert(buf_page_t::UNFIXED == 1U << 30, "comp.");
-		static_assert(buf_page_t::READ_FIX == 2U << 30, "comp.");
-		static_assert(buf_page_t::WRITE_FIX == 3U << 30, "comp.");
+		static_assert(buf_page_t::UNFIXED == 1U << 29, "comp.");
+		static_assert(buf_page_t::READ_FIX == 4U << 29, "comp.");
+		static_assert(buf_page_t::WRITE_FIX == 5U << 29, "comp.");
 
-		OK(fields[IDX_BUFFER_PAGE_IO_FIX]->store(
-			   std::min(1U, page_info->state >> 30), true));
+		unsigned io_fix = page_info->state >> 29;
+		if (io_fix < 4) {
+			io_fix = 1;
+		} else if (io_fix > 5) {
+			io_fix = 3;
+		} else {
+			io_fix -= 2;
+		}
+
+		OK(fields[IDX_BUFFER_PAGE_IO_FIX]->store(io_fix, true));
 
 		OK(fields[IDX_BUFFER_PAGE_IS_OLD]->store(
 			   page_info->is_old, true));
@@ -4113,13 +4121,13 @@ i_s_innodb_buffer_page_get_info(
 	static_assert(buf_page_t::NOT_USED == 0, "compatibility");
 	static_assert(buf_page_t::MEMORY == 1, "compatibility");
 	static_assert(buf_page_t::REMOVE_HASH == 2, "compatibility");
-	static_assert(buf_page_t::UNFIXED == 1U << 30, "compatibility");
-	static_assert(buf_page_t::READ_FIX == 2U << 30, "compatibility");
-	static_assert(buf_page_t::WRITE_FIX == 3U << 30, "compatibility");
+	static_assert(buf_page_t::UNFIXED == 1U << 29, "compatibility");
+	static_assert(buf_page_t::READ_FIX == 4U << 29, "compatibility");
+	static_assert(buf_page_t::WRITE_FIX == 5U << 29, "compatibility");
 
 	page_info->state = bpage->state();
 
-	if (page_info->state < buf_page_t::UNFIXED) {
+	if (page_info->state < buf_page_t::FREED) {
 		page_info->page_type = I_S_PAGE_TYPE_UNKNOWN;
 		page_info->compressed_only = false;
 	} else {
@@ -4516,12 +4524,20 @@ i_s_innodb_buf_page_lru_fill(
 		OK(fields[IDX_BUF_LRU_PAGE_STATE]->store(
 			   page_info->compressed_only, true));
 
-		static_assert(buf_page_t::UNFIXED == 1U << 30, "comp.");
-		static_assert(buf_page_t::READ_FIX == 2U << 30, "comp.");
-		static_assert(buf_page_t::WRITE_FIX == 3U << 30, "comp.");
+		static_assert(buf_page_t::UNFIXED == 1U << 29, "comp.");
+		static_assert(buf_page_t::READ_FIX == 4U << 29, "comp.");
+		static_assert(buf_page_t::WRITE_FIX == 5U << 29, "comp.");
 
-		OK(fields[IDX_BUF_LRU_PAGE_IO_FIX]->store(
-			   std::min(1U, page_info->state >> 30), true));
+		unsigned io_fix = page_info->state >> 29;
+		if (io_fix < 4) {
+			io_fix = 1;
+		} else if (io_fix > 5) {
+			io_fix = 3;
+		} else {
+			io_fix -= 2;
+		}
+
+		OK(fields[IDX_BUF_LRU_PAGE_IO_FIX]->store(io_fix, true));
 
 		OK(fields[IDX_BUF_LRU_PAGE_IS_OLD]->store(
 			   page_info->is_old, true));

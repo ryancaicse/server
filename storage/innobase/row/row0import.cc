@@ -4309,6 +4309,7 @@ fil_tablespace_iterate(
 
 	aligned_free(page);
 	ut_free(filepath);
+	block->page.lock.free();
 	ut_free(block);
 
 	return(err);

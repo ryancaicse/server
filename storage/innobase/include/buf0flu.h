@@ -117,7 +117,7 @@ inline void buf_flush_note_modification(buf_block_t *b, lsn_t start, lsn_t end)
 {
   ut_ad(!srv_read_only_mode);
   ut_d(const auto s= b->page.state());
-  ut_ad(s > buf_page_t::UNFIXED);
+  ut_ad(s > buf_page_t::FREED);
   ut_ad(s < buf_page_t::READ_FIX);
   ut_ad(mach_read_from_8(b->page.frame + FIL_PAGE_LSN) <= end);
   mach_write_to_8(b->page.frame + FIL_PAGE_LSN, end);

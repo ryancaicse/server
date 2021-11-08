@@ -329,8 +329,8 @@ buf_dump(
 	     bpage != NULL && j < n_pages;
 	     bpage = UT_LIST_GET_NEXT(LRU, bpage)) {
 		const auto status = bpage->state();
-		ut_a(status >= buf_page_t::UNFIXED);
-		if ((status & buf_page_t::STATUS_MASK) == buf_page_t::FREED) {
+		if (status < buf_page_t::UNFIXED) {
+			ut_a(status >= buf_page_t::FREED);
 			continue;
 		}
 		const page_id_t id{bpage->id()};

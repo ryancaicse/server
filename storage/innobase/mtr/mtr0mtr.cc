@@ -485,8 +485,8 @@ struct Shrink
     case MTR_MEMO_PAGE_X_FIX:
     case MTR_MEMO_PAGE_SX_FIX:
       auto &bpage= static_cast<buf_block_t*>(slot->object)->page;
-      ut_d(const auto s= bpage.state());
-      ut_ad(s > buf_page_t::UNFIXED);
+      const auto s= bpage.state();
+      ut_ad(s >= buf_page_t::FREED);
       ut_ad(s < buf_page_t::READ_FIX);
       ut_ad(bpage.frame);
       const page_id_t id{bpage.id()};
@@ -497,6 +497,8 @@ struct Shrink
                srv_is_undo_tablespace(high.space())));
         break;
       }
+      if (s >= buf_page_t::UNFIXED)
+        bpage.set_freed(s);
       ut_ad(id.space() == high.space());
       if (bpage.oldest_modification() > 1)
         bpage.reset_oldest_modification();
@@ -1167,36 +1169,43 @@ void mtr_t::lock_upgrade(const index_lock &lock)
 void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
 {
   mtr_memo_type_t fix_type;
+  const auto state= block->page.state();
+  ut_ad(state >= buf_page_t::FREED);
   switch (rw_latch)
   {
   case RW_NO_LATCH:
     fix_type= MTR_MEMO_BUF_FIX;
-    while (block->page.is_io_fixed())
+    if (state >= buf_page_t::READ_FIX && state < buf_page_t::WRITE_FIX)
     {
       /* The io-fix will be released after block->page.lock in
       buf_page_t::read_complete(), buf_pool_t::corrupted_evict(), and
       buf_page_t::write_complete(). */
       block->page.lock.s_lock();
+      block->page.wait_for_read_unfix();
       block->page.lock.s_unlock();
     }
     goto done;
   case RW_S_LATCH:
     fix_type= MTR_MEMO_PAGE_S_FIX;
     block->page.lock.s_lock();
+    if (state >= buf_page_t::READ_FIX && state < buf_page_t::WRITE_FIX)
+      block->page.wait_for_read_unfix();
     break;
   case RW_SX_LATCH:
     fix_type= MTR_MEMO_PAGE_SX_FIX;
     block->page.lock.u_lock();
+    block->page.wait_for_io_unfix();
     break;
   default:
     ut_ad(rw_latch == RW_X_LATCH);
     fix_type= MTR_MEMO_PAGE_X_FIX;
     if (block->page.lock.x_lock_upgraded())
     {
-      page_lock_upgrade(*block);
       block->unfix();
+      page_lock_upgrade(*block);
       return;
     }
+    block->page.wait_for_io_unfix();
   }
 
 #ifdef BTR_CUR_HASH_ADAPT
@@ -1205,13 +1214,9 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
       mtr_defer_drop_ahi(block, fix_type);
 #endif /* BTR_CUR_HASH_ADAPT */
 
-  while (block->page.is_io_fixed())
-    /* The io-fix will be released after block->page.lock in
-    buf_page_t::read_complete() and buf_page_t::write_complete(). */
-    (void) LF_BACKOFF();
-
 done:
-  ut_ad(page_id_t(page_get_space_id(block->page.frame),
+  ut_ad(state < buf_page_t::UNFIXED ||
+        page_id_t(page_get_space_id(block->page.frame),
                   page_get_page_no(block->page.frame)) == block->page.id());
   memo_push(block, fix_type);
 }

@@ -4742,7 +4742,7 @@ loop:
 		goto function_exit;
 	}
 
-	DBUG_ASSERT(block->page.status() != buf_page_t::FREED);
+	DBUG_ASSERT(!block->page.is_freed());
 
 	for (i = 0; i < nth_lock; i++) {
 
@@ -4866,7 +4866,7 @@ static void lock_rec_block_validate(const page_id_t page_id)
 				   << page_id << " err " << err;
 		}
 
-		ut_ad(!block || block->page.status() == buf_page_t::FREED
+		ut_ad(!block || block->page.is_freed()
 		      || lock_rec_validate_page(block, space->is_latched()));
 
 		mtr_commit(&mtr);

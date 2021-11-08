@@ -801,8 +801,7 @@ btr_cur_optimistic_latch_leaves(
 
 			if (!cursor->left_block) {
 				cursor->index->table->file_unreadable = true;
-			} else if (cursor->left_block->page.status()
-				   == buf_page_t::FREED
+			} else if (cursor->left_block->page.is_freed()
 				   || btr_page_get_next(
 					   cursor->left_block->page.frame)
 				   != curr_page_no) {

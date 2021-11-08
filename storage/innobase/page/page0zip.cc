@@ -443,7 +443,6 @@ static void page_zip_compress_write_log(buf_block_t *block,
   if (trailer_size)
     mtr->zmemcpy(*block, page_zip_get_size(page_zip) - trailer_size,
                  trailer_size);
-  block->page.set_inited(); /* similar to mtr_t::init() */
 }
 
 /******************************************************//**

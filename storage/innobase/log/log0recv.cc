@@ -2740,7 +2740,7 @@ set_start_lsn:
 		any buffered changes. */
 		init->created = false;
 		ut_ad(!mtr.has_modifications());
-		block->page.set_freed();
+		block->page.set_freed(block->page.state());
 	}
 
 	/* Make sure that committing mtr does not change the modification

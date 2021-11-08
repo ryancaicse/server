@@ -4200,7 +4200,8 @@ void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t page_id,
 	ut_ad(!block || page_id == block->page.id());
 	ut_ad(!block || block->page.in_file());
 	ut_ad(!block || block->page.frame);
-	ut_ad(!block || block->page.status() == buf_page_t::NORMAL);
+	ut_ad(!block || !block->page.is_ibuf_exist());
+	ut_ad(!block || !block->page.is_reinit());
 	ut_ad(!trx_sys_hdr_page(page_id));
 	ut_ad(page_id < page_id_t(SRV_SPACE_ID_UPPER_BOUND, 0));
 
