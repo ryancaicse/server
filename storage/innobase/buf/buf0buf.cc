@@ -1333,6 +1333,7 @@ inline bool buf_pool_t::realloc(buf_block_t *block)
 			srv_page_size);
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		const auto frame = new_block->page.frame;
+		block->page.lock.free();
 		new (&new_block->page) buf_page_t(block->page);
 		new_block->page.frame = frame;
 
@@ -2040,6 +2041,7 @@ static void buf_relocate(buf_page_t *bpage, buf_page_t *dpage)
        state == buf_page_t::REINIT + 1);
   const auto frame= dpage->frame;
 
+  dpage->lock.free();
   new (dpage) buf_page_t(*bpage);
 
   dpage->frame= frame;
@@ -2873,7 +2875,9 @@ re_evict:
 		block->page.lock.x_lock();
 		block->page.wait_for_io_unfix();
 
-		if (block->page.is_ibuf_exist()) {
+		const auto state = block->page.state();
+		if (state >= buf_page_t::IBUF_EXIST
+		    && state < buf_page_t::REINIT) {
 			block->page.clear_ibuf_exist();
 			ibuf_merge_or_delete_for_page(block, page_id,
 						      block->zip_size());
@@ -2931,9 +2935,14 @@ buf_page_get_gen(
     {
       block->page.lock.x_lock();
       block->page.wait_for_io_unfix();
-      if (block->page.is_ibuf_exist())
-        block->page.clear_ibuf_exist();
-      ibuf_merge_or_delete_for_page(block, page_id, block->zip_size());
+      if (block->page.is_freed())
+        ut_ad(mode == BUF_GET_POSSIBLY_FREED || mode == BUF_PEEK_IF_IN_POOL);
+      else
+      {
+        if (block->page.is_ibuf_exist())
+          block->page.clear_ibuf_exist();
+        ibuf_merge_or_delete_for_page(block, page_id, block->zip_size());
+      }
 
       if (rw_latch == RW_X_LATCH)
       {

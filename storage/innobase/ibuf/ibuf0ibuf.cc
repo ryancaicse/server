@@ -4198,7 +4198,6 @@ void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t page_id,
 	ulint		dops[IBUF_OP_COUNT];
 
 	ut_ad(!block || page_id == block->page.id());
-	ut_ad(!block || block->page.in_file());
 	ut_ad(!block || block->page.frame);
 	ut_ad(!block || !block->page.is_ibuf_exist());
 	ut_ad(!block || !block->page.is_reinit());

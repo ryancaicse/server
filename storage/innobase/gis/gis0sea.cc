@@ -1498,6 +1498,7 @@ rtr_copy_buf(
 	from the dummy buf_block_t we create here and because memcpy()ing
 	it generates (valid) compiler warnings that the vtable pointer
 	will be copied. */
+	matches->block.page.lock.free();
 	new (&matches->block.page) buf_page_t(block->page);
 	matches->block.page.frame = block->page.frame;
 	matches->block.unzip_LRU = block->unzip_LRU;
