@@ -7472,6 +7472,7 @@ static bool mysql_inplace_alter_table(THD *thd,
        inplace_supported == HA_ALTER_INPLACE_NOCOPY_NO_LOCK) &&
       !(thd->locked_tables_mode == LTM_LOCK_TABLES ||
         thd->locked_tables_mode == LTM_PRELOCKED_UNDER_LOCK_TABLES) &&
+      !ha_alter_info->no_downgrade_if_empty &&
       (alter_info->requested_lock != Alter_info::ALTER_TABLE_LOCK_EXCLUSIVE))
   {
     /* If storage engine or user requested shared lock downgrade to SNW. */

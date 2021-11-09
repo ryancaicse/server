@@ -5268,7 +5268,8 @@ Alter_inplace_info::Alter_inplace_info(HA_CREATE_INFO *create_info_arg,
     rename_keys(current_thd->mem_root),
     modified_part_info(modified_part_info_arg),
     ignore(ignore_arg),
-    error_if_not_empty(error_non_empty)
+    error_if_not_empty(error_non_empty),
+    no_downgrade_if_empty(false)
   {}
 
 void Alter_inplace_info::report_unsupported_error(const char *not_supported,
