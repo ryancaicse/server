@@ -3080,7 +3080,7 @@ buf_block_t *buf_page_try_get(const page_id_t page_id, mtr_t *mtr)
     return nullptr;
   }
 
-  ut_ad(!block->page.is_io_fixed());
+  ut_ad(!block->page.is_read_fixed());
   mtr_memo_push(mtr, block, MTR_MEMO_PAGE_S_FIX);
 
 #ifdef UNIV_DEBUG

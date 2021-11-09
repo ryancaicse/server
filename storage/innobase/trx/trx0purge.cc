@@ -712,10 +712,9 @@ not_free:
 #ifdef BTR_CUR_HASH_ADAPT
         ut_ad(!block->index); /* There is no AHI on undo tablespaces. */
 #endif
-        block->page.lock.x_lock();
-        ut_ad(!block->page.is_io_fixed());
-        mysql_mutex_lock(&buf_pool.flush_list_mutex);
+        bpage->lock.x_lock();
         ut_ad(!bpage->is_io_fixed());
+        mysql_mutex_lock(&buf_pool.flush_list_mutex);
 
         if (bpage->oldest_modification() > 1)
         {
