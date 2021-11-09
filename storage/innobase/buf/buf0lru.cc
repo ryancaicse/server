@@ -1227,18 +1227,18 @@ ATTRIBUTE_COLD void buf_pool_t::corrupted_evict(buf_page_t *bpage)
 
   ut_ad(!bpage->oldest_modification());
   bpage->set_corrupt_id();
+  constexpr auto read_unfix= buf_page_t::READ_FIX - buf_page_t::UNFIXED;
+  auto s= bpage->zip.fix.fetch_sub(read_unfix) - read_unfix;
   bpage->lock.x_unlock(true);
 
-  const auto read_unfix= buf_page_t::READ_FIX - buf_page_t::UNFIXED;
-
-  for (auto s= bpage->zip.fix.fetch_sub(read_unfix) - read_unfix;
-       s != buf_page_t::UNFIXED; s= bpage->state())
+  while (s != buf_page_t::UNFIXED)
   {
-    ut_ad(s >= buf_page_t::UNFIXED);
+    ut_ad(s > buf_page_t::UNFIXED);
     ut_ad(s < buf_page_t::READ_FIX);
     /* Wait for other threads to release the fix count
     before releasing the bpage from LRU list. */
     (void) LF_BACKOFF();
+    s= bpage->state();
   }
 
   /* remove from LRU and page_hash */

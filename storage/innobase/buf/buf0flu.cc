@@ -343,12 +343,12 @@ inline void buf_page_t::write_complete(bool temporary)
     ut_ad(oldest_modification() > 2);
     oldest_modification_.store(1, std::memory_order_release);
   }
-  lock.u_unlock(true);
   const auto s= state();
   ut_ad(s >= WRITE_FIX);
   zip.fix.fetch_sub((s >= WRITE_FIX_REINIT)
                     ? (WRITE_FIX_REINIT - UNFIXED)
                     : (WRITE_FIX - UNFIXED));
+  lock.u_unlock(true);
 }
 
 /** Complete write of a file page from buf_pool.
@@ -1212,8 +1212,6 @@ static void buf_flush_discard_page(buf_page_t *bpage)
 
   if (!bpage->lock.u_lock_try(false))
     return;
-
-  bpage->wait_for_io_unfix();
 
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
   buf_pool.delete_from_flush_list(bpage);

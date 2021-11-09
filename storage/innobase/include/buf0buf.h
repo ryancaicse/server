@@ -707,9 +707,6 @@ public:
     access_time= 0;
   }
 
-  ATTRIBUTE_NOINLINE void wait_for_io() const;
-  ATTRIBUTE_NOINLINE void wait_for_read() const;
-
 public:
   const page_id_t &id() const { return id_; }
   uint32_t state() const { return zip.fix; }
@@ -719,17 +716,17 @@ public:
     ut_ad(f >= FREED);
     return f < UNFIXED ? (f - FREED) : (~LRU_MASK & f);
   }
+  /** @return whether this block is read or write fixed;
+  read_complete() or write_complete() will always release
+  the io-fix before releasing U-lock or X-lock */
   bool is_io_fixed() const
   { const auto s= state(); ut_ad(s >= FREED); return s >= READ_FIX; }
+  /** @return whether this block is write fixed;
+  write_complete() will always release the write-fix before releasing U-lock */
   bool is_write_fixed() const { return state() >= WRITE_FIX; }
+  /** @return whether this block is read fixed; this should never hold
+  when a thread is holding the block lock in any mode */
   bool is_read_fixed() const { return is_io_fixed() && !is_write_fixed(); }
-
-  /** After acquiring lock, ensure that any I/O fix has been cleared.
-  The I/O fix would be released immediately after releasing the lock. */
-  void wait_for_io_unfix() const { if (is_io_fixed()) wait_for_io(); }
-  /** After acquiring lock, ensure that any read fix has been cleared.
-  The read fix would be released immediately after releasing the X lock. */
-  void wait_for_read_unfix() const { if (is_read_fixed()) wait_for_read(); }
 
   /** @return if this belongs to buf_pool.unzip_LRU */
   bool belongs_to_unzip_LRU() const
@@ -2049,7 +2046,8 @@ inline bool buf_page_t::can_relocate() const
   const auto f= state();
   ut_ad(f >= FREED);
   ut_ad(in_LRU_list);
-  return f == FREED || (f < READ_FIX && !(f & ~LRU_MASK));
+  return (f == FREED || (f < READ_FIX && !(f & ~LRU_MASK))) &&
+    !lock.is_locked_or_waiting();
 }
 
 /** @return whether the block has been flagged old in buf_pool.LRU */

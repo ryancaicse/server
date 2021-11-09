@@ -277,6 +277,8 @@ public:
 
   bool is_write_locked() const { return lock.is_write_locked(); }
 
+  bool is_locked_or_waiting() const { return lock.is_locked_or_waiting(); }
+
   inline void lock_shared();
   inline void unlock_shared();
 };

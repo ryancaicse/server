@@ -1103,7 +1103,7 @@ static void mtr_defer_drop_ahi(buf_block_t *block, mtr_memo_type_t fix_type)
         btr_search_drop_page_hash_index(block);
     block->page.lock.x_unlock();
     block->page.lock.s_lock();
-    block->page.wait_for_read_unfix();
+    ut_ad(!block->page.is_read_fixed());
     break;
   case MTR_MEMO_PAGE_SX_FIX:
     block->page.lock.u_x_upgrade();
@@ -1182,19 +1182,19 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
       buf_page_t::read_complete(), buf_pool_t::corrupted_evict(), and
       buf_page_t::write_complete(). */
       block->page.lock.s_lock();
-      block->page.wait_for_read_unfix();
+      ut_ad(!block->page.is_read_fixed());
       block->page.lock.s_unlock();
     }
     goto done;
   case RW_S_LATCH:
     fix_type= MTR_MEMO_PAGE_S_FIX;
     block->page.lock.s_lock();
-    block->page.wait_for_read_unfix();
+    ut_ad(!block->page.is_read_fixed());
     break;
   case RW_SX_LATCH:
     fix_type= MTR_MEMO_PAGE_SX_FIX;
     block->page.lock.u_lock();
-    block->page.wait_for_io_unfix();
+    ut_ad(!block->page.is_io_fixed());
     break;
   default:
     ut_ad(rw_latch == RW_X_LATCH);
@@ -1205,7 +1205,7 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
       page_lock_upgrade(*block);
       return;
     }
-    block->page.wait_for_io_unfix();
+    ut_ad(!block->page.is_io_fixed());
   }
 
 #ifdef BTR_CUR_HASH_ADAPT

@@ -1126,13 +1126,13 @@ got_no_latch:
 				goto fail;
 			}
 			fix_type = MTR_MEMO_PAGE_S_FIX;
-			block->page.wait_for_read_unfix();
+			ut_ad(!block->page.is_read_fixed());
 		} else {
 			if (!block->page.lock.x_lock_try()) {
 				goto got_no_latch;
 			}
 			fix_type = MTR_MEMO_PAGE_X_FIX;
-			block->page.wait_for_io_unfix();
+			ut_ad(!block->page.is_io_fixed());
 		}
 		mtr->memo_push(block, fix_type);
 
@@ -1271,6 +1271,7 @@ retry:
 	ut_ad(state == buf_page_t::REMOVE_HASH
 	      || !(~buf_page_t::LRU_MASK & state)
 	      || block->page.lock.have_any());
+	ut_ad(state < buf_page_t::READ_FIX || state >= buf_page_t::WRITE_FIX);
 	ut_ad(page_is_leaf(block->page.frame));
 
 	/* We must not dereference block->index here, because it could be freed
