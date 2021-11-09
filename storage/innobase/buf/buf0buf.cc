@@ -2164,10 +2164,11 @@ void buf_pool_t::watch_unset(const page_id_t id, buf_pool_t::hash_chain &chain)
     transactional_lock_guard<page_hash_latch> g{page_hash.lock_get(chain)};
     /* The page must exist because watch_set() increments buf_fix_count. */
     w= page_hash.get(id, chain);
-    const auto buf_fix_count= w->buf_fix_count();
-    ut_ad(buf_fix_count);
+    const auto state= w->state();
+    ut_ad(state >= buf_page_t::UNFIXED);
+    ut_ad(~buf_page_t::LRU_MASK & state);
     ut_ad(w->in_page_hash);
-    if (buf_fix_count != 1 || !watch_is_sentinel(*w))
+    if (state != buf_page_t::UNFIXED + 1 || !watch_is_sentinel(*w))
     {
       w->unfix();
       w= nullptr;
@@ -2231,14 +2232,11 @@ void buf_page_free(fil_space_t *space, uint32_t page, mtr_t *mtr)
     if (!block || !block->page.frame)
       /* FIXME: convert ROW_FORMAT=COMPRESSED, without buf_zip_decompress() */
       return;
-    block->fix();
+    block->page.lock.x_lock();
   }
-  ut_ad(block->page.buf_fix_count());
 
+  block->page.fix_and_set_freed(1);
   mtr->memo_push(block, MTR_MEMO_PAGE_X_FIX);
-  block->page.lock.x_lock();
-  ut_ad(!block->page.is_io_fixed());
-  block->page.set_freed(block->page.state());
 }
 
 /** Get read access to a compressed page (usually of type
@@ -2280,7 +2278,7 @@ lookup:
 
       if (discard_attempted || !bpage->frame)
       {
-        bpage->fix();
+        bpage->lock.s_lock();
         break;
       }
     }
@@ -2292,16 +2290,18 @@ lookup:
     mysql_mutex_unlock(&buf_pool.mutex);
   }
 
-  DBUG_ASSERT(!bpage->is_freed());
+  {
+    ut_d(const auto s=) bpage->fix();
+    ut_ad(s >= buf_page_t::UNFIXED);
+    ut_ad(s < buf_page_t::READ_FIX || s >= buf_page_t::WRITE_FIX);
+  }
+
   bpage->set_accessed();
   buf_page_make_young_if_needed(bpage);
 
 #ifdef UNIV_DEBUG
   if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG */
-  bpage->lock.s_lock();
-  ut_ad(!bpage->is_read_fixed());
-  ut_ad(bpage->state() > buf_page_t::UNFIXED);
   return bpage;
 
 must_read_page:
@@ -2678,14 +2678,15 @@ retry_page_zip:
 			goto loop;
 		}
 
-		ut_ad(!block->page.is_io_fixed());
+		const auto s = block->page.state();
 
-		switch (block->page.state()) {
+		switch (s) {
 		case buf_page_t::UNFIXED + 1:
 		case buf_page_t::IBUF_EXIST + 1:
 		case buf_page_t::REINIT + 1:
 			break;
 		default:
+			ut_ad(s < buf_page_t::READ_FIX);
 			block->page.lock.x_unlock();
 			goto retry_page_zip;
 		}
@@ -2701,42 +2702,24 @@ retry_page_zip:
 		would likely make a  memory transaction too large. */
 		hash_lock.lock();
 
-		/* Buffer-fixing prevents the page_hash from changing. */
+		/* block->page.lock implies !block->page.can_relocate() */
 		ut_ad(&block->page == buf_pool.page_hash.get(page_id, chain));
-		block->page.lock.x_unlock();
 
-		switch (block->page.state()) {
-		case buf_page_t::UNFIXED + 1:
-		case buf_page_t::IBUF_EXIST + 1:
-		case buf_page_t::REINIT + 1:
-			break;
-		default:
-			/* The block was buffer-fixed while
-			buf_pool.mutex was not held by this thread.
-			Free the block that was allocated and retry.
-			This should be extremely unlikely, for example,
-			if buf_page_get_zip() was invoked. */
-
-			hash_lock.unlock();
-			buf_LRU_block_free_non_file_page(new_block);
-			mysql_mutex_unlock(&buf_pool.mutex);
-
-			/* Try again */
-			block->page.unfix();
-			goto loop;
+		/* Concurrently, another buf_page_get_low() may have
+		invoked fix() while we are holding the exclusive lock. */
+		while (s != block->page.state()) {
+			LF_BACKOFF();
 		}
 
-		/* Move the compressed page from bpage to block,
+		/* Move the compressed page from block->page to new_block,
 		and uncompress it. */
 
-		/* Note: this is the uncompressed block and it is not
-		accessible by other threads yet because it is not in
-		any list or hash table */
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		buf_relocate(&block->page, &new_block->page);
 
 		/* X-latch the block for the duration of the decompression. */
 		new_block->page.lock.x_lock();
+		block->page.lock.x_unlock();
 
 		buf_flush_relocate_on_flush_list(&block->page,
 						 &new_block->page);
@@ -2765,8 +2748,8 @@ retry_page_zip:
 		buf_pool.mutex. */
 
 		if (!buf_zip_decompress(block, false)) {
+			block->page.unfix();
 			block->page.lock.x_unlock();
-			block->unfix();
 			--buf_pool.n_pend_unzip;
 			/* FIXME: Evict the corrupted
 			ROW_FORMAT=COMPRESSED page! */
@@ -2915,6 +2898,8 @@ buf_page_get_gen(
 {
   if (buf_block_t *block= recv_sys.recover(page_id))
   {
+    ut_ad(!block->page.is_io_fixed());
+    /* Recovery is a special case; we fix() before acquiring lock. */
     const auto s= block->page.fix();
     if (err)
       *err= DB_SUCCESS;
@@ -2927,7 +2912,6 @@ buf_page_get_gen(
              page_is_leaf(block->page.frame))
     {
       block->page.lock.x_lock();
-      ut_ad(!block->page.is_io_fixed());
       if (block->page.is_freed())
         ut_ad(mode == BUF_GET_POSSIBLY_FREED || mode == BUF_PEEK_IF_IN_POOL);
       else
@@ -3070,17 +3054,11 @@ buf_block_t *buf_page_try_get(const page_id_t page_id, mtr_t *mtr)
       {buf_pool.page_hash.lock_get(chain)};
     block= reinterpret_cast<buf_block_t*>
       (buf_pool.page_hash.get(page_id, chain));
-    if (!block || !block->page.frame)
+    if (!block || !block->page.frame || !block->page.lock.s_lock_try())
       return nullptr;
-    block->fix();
   }
 
-  if (!block->page.lock.s_lock_try())
-  {
-    block->unfix();
-    return nullptr;
-  }
-
+  block->page.fix();
   ut_ad(!block->page.is_read_fixed());
   mtr_memo_push(mtr, block, MTR_MEMO_PAGE_S_FIX);
 
@@ -3130,7 +3108,6 @@ static buf_block_t *buf_page_create_low(page_id_t page_id, ulint zip_size,
 
     if (!mtr->have_x_latch(reinterpret_cast<const buf_block_t&>(*bpage)))
     {
-      auto state= bpage->fix();
       const bool got= bpage->lock.x_lock_try();
       if (!got)
       {
@@ -3139,8 +3116,8 @@ static buf_block_t *buf_page_create_low(page_id_t page_id, ulint zip_size,
         mysql_mutex_lock(&buf_pool.mutex);
       }
 
-      state= bpage->state();
-      ut_ad(state > buf_page_t::FREED);
+      auto state= bpage->fix();
+      ut_ad(state >= buf_page_t::FREED);
       ut_ad(state < buf_page_t::READ_FIX);
 
       if (state < buf_page_t::UNFIXED)

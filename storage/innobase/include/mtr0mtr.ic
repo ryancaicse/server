@@ -167,6 +167,8 @@ mtr_t::release_block_at_savepoint(
   mtr_memo_slot_t *slot = m_memo.at<mtr_memo_slot_t*>(savepoint);
 
   ut_a(slot->object == block);
+  slot->object= nullptr;
+  block->page.unfix();
 
   switch (slot->type) {
   case MTR_MEMO_PAGE_S_FIX:
@@ -179,7 +181,4 @@ mtr_t::release_block_at_savepoint(
   default:
     break;
   }
-
-  block->unfix();
-  slot->object= nullptr;
 }

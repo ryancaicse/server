@@ -762,13 +762,16 @@ public:
     ut_ad(s < REINIT);
   }
 
-  void set_freed(uint32_t prev_state)
+  void set_freed(uint32_t prev_state, uint32_t count= 0)
   {
+    ut_ad(lock.is_write_locked());
     ut_ad(prev_state >= UNFIXED);
     ut_ad(prev_state < READ_FIX);
-    ut_d(auto s=) zip.fix.fetch_sub((prev_state & LRU_MASK) - FREED);
+    ut_d(auto s=) zip.fix.fetch_sub((prev_state & LRU_MASK) - FREED - count);
     ut_ad(s == prev_state);
   }
+
+  void fix_and_set_freed(uint32_t count) { set_freed(state(), count); }
 
   inline void set_state(uint32_t count);
   inline void set_corrupt_id();

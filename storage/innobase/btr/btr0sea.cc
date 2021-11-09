@@ -1090,7 +1090,7 @@ fail:
 	if (!ahi_latch) {
 		buf_pool_t::hash_chain& chain = buf_pool.page_hash.cell_get(
 			block->page.id().fold());
-		bool fail;
+		bool fail, got_latch;
 		{
 			transactional_shared_lock_guard<page_hash_latch> g{
 				buf_pool.page_hash.lock_get(chain)};
@@ -1109,28 +1109,26 @@ fail:
 				ut_error;
 			}
 
-			block->fix();
 			fail = index != block->index
 				&& index_id == block->index->id;
+			got_latch = (latch_mode == BTR_SEARCH_LEAF)
+				? block->page.lock.s_lock_try()
+				: block->page.lock.x_lock_try();
 		}
 
 		ut_a(!fail || block->index->freed());
-		block->page.set_accessed();
+		if (!got_latch) {
+			goto fail;
+		}
 
+		block->page.fix();
+		block->page.set_accessed();
 		buf_page_make_young_if_needed(&block->page);
 		mtr_memo_type_t	fix_type;
 		if (latch_mode == BTR_SEARCH_LEAF) {
-			if (!block->page.lock.s_lock_try()) {
-got_no_latch:
-				block->page.unfix();
-				goto fail;
-			}
 			fix_type = MTR_MEMO_PAGE_S_FIX;
 			ut_ad(!block->page.is_read_fixed());
 		} else {
-			if (!block->page.lock.x_lock_try()) {
-				goto got_no_latch;
-			}
 			fix_type = MTR_MEMO_PAGE_X_FIX;
 			ut_ad(!block->page.is_io_fixed());
 		}

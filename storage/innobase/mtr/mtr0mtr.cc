@@ -207,41 +207,40 @@ private:
 @param slot	memo slot */
 static void memo_slot_release(mtr_memo_slot_t *slot)
 {
+  void *object= slot->object;
+  slot->object= nullptr;
   switch (const auto type= slot->type) {
   case MTR_MEMO_S_LOCK:
-    static_cast<index_lock*>(slot->object)->s_unlock();
+    static_cast<index_lock*>(object)->s_unlock();
     break;
   case MTR_MEMO_X_LOCK:
   case MTR_MEMO_SX_LOCK:
-    static_cast<index_lock*>(slot->object)->
+    static_cast<index_lock*>(object)->
       u_or_x_unlock(type == MTR_MEMO_SX_LOCK);
     break;
   case MTR_MEMO_SPACE_X_LOCK:
-    static_cast<fil_space_t*>(slot->object)->set_committed_size();
-    static_cast<fil_space_t*>(slot->object)->x_unlock();
+    static_cast<fil_space_t*>(object)->set_committed_size();
+    static_cast<fil_space_t*>(object)->x_unlock();
     break;
   case MTR_MEMO_SPACE_S_LOCK:
-    static_cast<fil_space_t*>(slot->object)->s_unlock();
+    static_cast<fil_space_t*>(object)->s_unlock();
     break;
   default:
-    buf_page_t *bpage= static_cast<buf_page_t*>(slot->object);
+    buf_page_t *bpage= static_cast<buf_page_t*>(object);
+    bpage->unfix();
     switch (auto latch= slot->type & ~MTR_MEMO_MODIFY) {
     case MTR_MEMO_PAGE_S_FIX:
       bpage->lock.s_unlock();
-      goto unfix;
+      return;
     case MTR_MEMO_PAGE_SX_FIX:
     case MTR_MEMO_PAGE_X_FIX:
       bpage->lock.u_or_x_unlock(latch == MTR_MEMO_PAGE_SX_FIX);
       /* fall through */
     case MTR_MEMO_BUF_FIX:
-      goto unfix;
+      return;
     }
     ut_ad("invalid type" == 0);
-  unfix:
-    bpage->unfix();
-    break;
   }
-  slot->object= nullptr;
 }
 
 /** Release the latches acquired by the mini-transaction. */
@@ -249,43 +248,42 @@ struct ReleaseLatches {
   /** @return true always. */
   bool operator()(mtr_memo_slot_t *slot) const
   {
-    if (!slot->object)
+    void *object= slot->object;
+    if (!object)
       return true;
+    slot->object= nullptr;
     switch (const auto type= slot->type) {
     case MTR_MEMO_S_LOCK:
-      static_cast<index_lock*>(slot->object)->s_unlock();
+      static_cast<index_lock*>(object)->s_unlock();
       break;
     case MTR_MEMO_SPACE_X_LOCK:
-      static_cast<fil_space_t*>(slot->object)->set_committed_size();
-      static_cast<fil_space_t*>(slot->object)->x_unlock();
+      static_cast<fil_space_t*>(object)->set_committed_size();
+      static_cast<fil_space_t*>(object)->x_unlock();
       break;
     case MTR_MEMO_SPACE_S_LOCK:
-      static_cast<fil_space_t*>(slot->object)->s_unlock();
+      static_cast<fil_space_t*>(object)->s_unlock();
       break;
     case MTR_MEMO_X_LOCK:
     case MTR_MEMO_SX_LOCK:
-      static_cast<index_lock*>(slot->object)->
+      static_cast<index_lock*>(object)->
         u_or_x_unlock(type == MTR_MEMO_SX_LOCK);
       break;
     default:
-      buf_page_t *bpage= static_cast<buf_page_t*>(slot->object);
+      buf_page_t *bpage= static_cast<buf_page_t*>(object);
+      bpage->unfix();
       switch (auto latch= slot->type & ~MTR_MEMO_MODIFY) {
       case MTR_MEMO_PAGE_S_FIX:
         bpage->lock.s_unlock();
-        goto unfix;
+        return true;
       case MTR_MEMO_PAGE_SX_FIX:
       case MTR_MEMO_PAGE_X_FIX:
         bpage->lock.u_or_x_unlock(latch == MTR_MEMO_PAGE_SX_FIX);
         /* fall through */
       case MTR_MEMO_BUF_FIX:
-      unfix:
-        bpage->unfix();
-        goto done;
+        return true;
       }
       ut_ad("invalid type" == 0);
     }
-done:
-    slot->object= nullptr;
     return true;
   }
 };
