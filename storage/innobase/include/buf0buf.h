@@ -719,7 +719,8 @@ public:
     ut_ad(f >= FREED);
     return f < UNFIXED ? (f - FREED) : (~LRU_MASK & f);
   }
-  bool is_io_fixed() const { return state() >= READ_FIX; }
+  bool is_io_fixed() const
+  { const auto s= state(); ut_ad(s >= FREED); return s >= READ_FIX; }
   bool is_write_fixed() const { return state() >= WRITE_FIX; }
   bool is_read_fixed() const { return is_io_fixed() && !is_write_fixed(); }
 

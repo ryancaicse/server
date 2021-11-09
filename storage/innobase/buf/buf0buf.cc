@@ -2310,9 +2310,9 @@ lookup:
 #ifdef UNIV_DEBUG
   if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG */
-  ut_ad(bpage->buf_fix_count());
-  ut_ad(bpage->in_file());
   bpage->lock.s_lock();
+  bpage->wait_for_read_unfix();
+  ut_ad(bpage->state() > buf_page_t::UNFIXED);
   return bpage;
 
 must_read_page:
@@ -2690,6 +2690,12 @@ retry_page_zip:
 		}
 
 		switch (block->page.state()) {
+		case buf_page_t::READ_FIX + 1:
+		case buf_page_t::WRITE_FIX + 1:
+		case buf_page_t::WRITE_FIX_IBUF + 1:
+		case buf_page_t::WRITE_FIX_REINIT + 1:
+			block->page.wait_for_io_unfix();
+			break;
 		case buf_page_t::UNFIXED + 1:
 		case buf_page_t::IBUF_EXIST + 1:
 		case buf_page_t::REINIT + 1:
@@ -3043,6 +3049,7 @@ buf_page_optimistic_get(
 		return(FALSE);
 	}
 
+	block->page.wait_for_io_unfix();
 	mtr_memo_push(mtr, block, fix_type);
 func_exit:
 #ifdef UNIV_DEBUG
@@ -3087,13 +3094,13 @@ buf_block_t *buf_page_try_get(const page_id_t page_id, mtr_t *mtr)
     return nullptr;
   }
 
+  block->page.wait_for_io_unfix();
   mtr_memo_push(mtr, block, MTR_MEMO_PAGE_S_FIX);
 
 #ifdef UNIV_DEBUG
   if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG */
   ut_ad(block->page.buf_fix_count());
-  ut_ad(block->page.in_file());
   ut_ad(block->page.id() == page_id);
 
   ++buf_pool.stat.n_page_gets;

@@ -1126,11 +1126,13 @@ got_no_latch:
 				goto fail;
 			}
 			fix_type = MTR_MEMO_PAGE_S_FIX;
+			block->page.wait_for_read_unfix();
 		} else {
 			if (!block->page.lock.x_lock_try()) {
 				goto got_no_latch;
 			}
 			fix_type = MTR_MEMO_PAGE_X_FIX;
+			block->page.wait_for_io_unfix();
 		}
 		mtr->memo_push(block, fix_type);
 

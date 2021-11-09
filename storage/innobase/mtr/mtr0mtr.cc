@@ -1103,6 +1103,7 @@ static void mtr_defer_drop_ahi(buf_block_t *block, mtr_memo_type_t fix_type)
         btr_search_drop_page_hash_index(block);
     block->page.lock.x_unlock();
     block->page.lock.s_lock();
+    block->page.wait_for_read_unfix();
     break;
   case MTR_MEMO_PAGE_SX_FIX:
     block->page.lock.u_x_upgrade();
@@ -1188,8 +1189,7 @@ void mtr_t::page_lock(buf_block_t *block, ulint rw_latch)
   case RW_S_LATCH:
     fix_type= MTR_MEMO_PAGE_S_FIX;
     block->page.lock.s_lock();
-    if (state >= buf_page_t::READ_FIX && state < buf_page_t::WRITE_FIX)
-      block->page.wait_for_read_unfix();
+    block->page.wait_for_read_unfix();
     break;
   case RW_SX_LATCH:
     fix_type= MTR_MEMO_PAGE_SX_FIX;

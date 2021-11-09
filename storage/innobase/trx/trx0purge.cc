@@ -713,6 +713,7 @@ not_free:
         ut_ad(!block->index); /* There is no AHI on undo tablespaces. */
 #endif
         block->page.lock.x_lock();
+        block->page.wait_for_io_unfix();
         mysql_mutex_lock(&buf_pool.flush_list_mutex);
         ut_ad(!bpage->is_io_fixed());
 
