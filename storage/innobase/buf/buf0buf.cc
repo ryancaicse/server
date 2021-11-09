@@ -222,8 +222,8 @@ the buddy allocator (buf0buddy.cc) to keep track of currently unused
 memory blocks of size UNIV_PAGE_SIZE_MIN..srv_page_size / 2.  These
 blocks are inside the srv_page_size-sized memory blocks of type
 BUF_BLOCK_MEMORY that the buddy allocator requests from the buffer
-pool.  The buddy allocator is solely used for allocating control
-blocks for compressed pages (buf_page_t) and compressed page frames.
+pool.  The buddy allocator is solely used for allocating
+ROW_FORMAT=COMPRESSED page frames.
 
 		Loading a file page
 		-------------------
@@ -1333,7 +1333,7 @@ inline bool buf_pool_t::realloc(buf_block_t *block)
 			srv_page_size);
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		const auto frame = new_block->page.frame;
-		block->page.lock.free();
+		new_block->page.lock.free();
 		new (&new_block->page) buf_page_t(block->page);
 		new_block->page.frame = frame;
 
