@@ -128,6 +128,10 @@ Json_writer& Json_writer::add_member(const char *name)
 
 Json_writer& Json_writer::add_member(const char *name, size_t len)
 {
+#if !defined(NDEBUG) || defined(JSON_WRITER_UNIT_TEST)
+  if (!fmt_helper.is_making_writer_calls())
+    got_name= true;
+#endif
   if (!fmt_helper.on_add_member(name, len))
   {
     // assert that we are in an object
@@ -138,10 +142,6 @@ Json_writer& Json_writer::add_member(const char *name, size_t len)
     output.append(name, len);
     output.append("\": ", 3);
   }
-#if !defined(NDEBUG) || defined(JSON_WRITER_UNIT_TEST)
-  if (!fmt_helper.is_making_writer_calls())
-    got_name= true;
-#endif
   return *this;
 }
 
