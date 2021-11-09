@@ -2671,24 +2671,13 @@ got_block:
 
 	if (UNIV_UNLIKELY(!block->page.frame)) {
 		if (!block->page.lock.x_lock_try()) {
-retry_page_zip:
+			/* The page is being read or written, or
+			another thread is executing buf_zip_decompress()
+			in buf_page_get_low() on it. */
 			block->page.unfix();
 			std::this_thread::sleep_for(
 				std::chrono::microseconds(100));
 			goto loop;
-		}
-
-		const auto s = block->page.state();
-
-		switch (s) {
-		case buf_page_t::UNFIXED + 1:
-		case buf_page_t::IBUF_EXIST + 1:
-		case buf_page_t::REINIT + 1:
-			break;
-		default:
-			ut_ad(s < buf_page_t::READ_FIX);
-			block->page.lock.x_unlock();
-			goto retry_page_zip;
 		}
 
 		buf_block_t *new_block = buf_LRU_get_free_block(false);
@@ -2705,10 +2694,31 @@ retry_page_zip:
 		/* block->page.lock implies !block->page.can_relocate() */
 		ut_ad(&block->page == buf_pool.page_hash.get(page_id, chain));
 
-		/* Concurrently, another buf_page_get_low() may have
-		invoked fix() while we are holding the exclusive lock. */
-		while (s != block->page.state()) {
-			LF_BACKOFF();
+		/* Wait for any other threads to release their buffer-fix
+		on the compressed-only block descriptor.
+		FIXME: Never fix() before acquiring the lock.
+		Only in buf_page_get_gen() and buf_page_get_low()
+		we are violating that principle. */
+		for (;;) {
+			switch (ut_d(const auto s =) block->page.state()) {
+			case buf_page_t::UNFIXED + 1:
+			case buf_page_t::IBUF_EXIST + 1:
+			case buf_page_t::REINIT + 1:
+				break;
+			default:
+				ut_ad(s < buf_page_t::READ_FIX);
+
+				if (s < buf_page_t::UNFIXED) {
+					ut_ad(s > buf_page_t::FREED);
+					block->page.unfix();
+					block->page.lock.x_unlock();
+					goto loop;
+				}
+
+				LF_BACKOFF();
+				continue;
+			}
+			break;
 		}
 
 		/* Move the compressed page from block->page to new_block,
