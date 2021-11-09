@@ -1830,13 +1830,9 @@ dict_load_indexes(
 
 	btr_pcur_open_on_user_rec(sys_index, tuple, PAGE_CUR_GE,
 				  BTR_SEARCH_LEAF, &pcur, &mtr);
-	for (;;) {
+	while (btr_pcur_is_on_user_rec(&pcur)) {
 		dict_index_t*	index = NULL;
 		const char*	err_msg;
-
-		if (!btr_pcur_is_on_user_rec(&pcur)) {
-			break;
-		}
 
 		rec = btr_pcur_get_rec(&pcur);
 		if ((ignore_err & DICT_ERR_IGNORE_RECOVER_LOCK)
@@ -1866,18 +1862,8 @@ dict_load_indexes(
 		ut_ad(!index == !!err_msg);
 
 		if (err_msg == dict_load_index_id_err) {
-			/* TABLE_ID mismatch means that we have
-			run out of index definitions for the table. */
-
-			if (dict_table_get_first_index(table) == NULL
-			    && !(ignore_err & DICT_ERR_IGNORE_INDEX)) {
-
-				ib::warn() << "No indexes found for table "
-					<< table->name;
-				error = DB_CORRUPTION;
-				goto func_exit;
-			}
-
+			/* We have ran out of index definitions for
+			the table. */
 			break;
 		}
 
@@ -2008,6 +1994,13 @@ corrupted:
 		}
 next_rec:
 		btr_pcur_move_to_next_user_rec(&pcur, &mtr);
+	}
+
+	if (!dict_table_get_first_index(table)
+	    && !(ignore_err & DICT_ERR_IGNORE_INDEX)) {
+		ib::warn() << "No indexes found for table " << table->name;
+		error = DB_CORRUPTION;
+		goto func_exit;
 	}
 
 	ut_ad(table->fts_doc_id_index == NULL);
