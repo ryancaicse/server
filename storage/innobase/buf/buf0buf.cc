@@ -2957,97 +2957,98 @@ This is the general function used to get optimistic access to a database
 page.
 @return TRUE if success */
 TRANSACTIONAL_TARGET
-ibool
-buf_page_optimistic_get(
-/*====================*/
-	ulint		rw_latch,/*!< in: RW_S_LATCH, RW_X_LATCH */
-	buf_block_t*	block,	/*!< in: guessed buffer block */
-	ib_uint64_t	modify_clock,/*!< in: modify clock value */
-	mtr_t*		mtr)	/*!< in: mini-transaction */
+bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
+                             uint64_t modify_clock, mtr_t *mtr)
 {
-	ibool		success;
+  ut_ad(block);
+  ut_ad(mtr);
+  ut_ad(mtr->is_active());
+  ut_ad(rw_latch == RW_S_LATCH || rw_latch == RW_X_LATCH);
 
-	ut_ad(block);
-	ut_ad(mtr);
-	ut_ad(mtr->is_active());
-	ut_ad(rw_latch == RW_S_LATCH || rw_latch == RW_X_LATCH);
+  if (have_transactional_memory);
+  else if (UNIV_UNLIKELY(!block->page.frame))
+    return false;
+  else
+  {
+    const auto state= block->page.state();
+    if (UNIV_UNLIKELY(state < buf_page_t::UNFIXED ||
+		      state >= buf_page_t::READ_FIX))
+      return false;
+  }
 
-	if (have_transactional_memory) {
-	} else if (UNIV_UNLIKELY(!block->page.frame
-				 || !block->page.in_file())) {
-		return FALSE;
-	}
+  bool success;
+  const page_id_t id{block->page.id()};
+  buf_pool_t::hash_chain &chain= buf_pool.page_hash.cell_get(id.fold());
+  bool have_u_not_x= false;
 
-	const page_id_t id{block->page.id()};
-	buf_pool_t::hash_chain& chain = buf_pool.page_hash.cell_get(id.fold());
+  {
+    transactional_shared_lock_guard<page_hash_latch> g
+      {buf_pool.page_hash.lock_get(chain)};
+    if (UNIV_UNLIKELY(id != block->page.id() || !block->page.frame))
+      return false;
+    const auto state= block->page.state();
+    if (UNIV_UNLIKELY(state < buf_page_t::UNFIXED ||
+                      state >= buf_page_t::READ_FIX))
+      return false;
 
-	{
-		transactional_shared_lock_guard<page_hash_latch> g{
-			buf_pool.page_hash.lock_get(chain)};
-		if (UNIV_UNLIKELY(id != block->page.id()
-				  || !block->page.frame
-				  || !block->page.in_file())) {
-			return FALSE;
-		}
-		block->fix();
-	}
+    if (rw_latch == RW_S_LATCH)
+      success= block->page.lock.s_lock_try();
+    else
+    {
+      have_u_not_x= block->page.lock.have_u_not_x();
+      success= have_u_not_x || block->page.lock.x_lock_try();
+    }
+  }
 
-	block->page.set_accessed();
+  mtr_memo_type_t fix_type;
 
-	buf_page_make_young_if_needed(&block->page);
+  if (rw_latch == RW_S_LATCH)
+    fix_type= MTR_MEMO_PAGE_S_FIX;
+  else if (have_u_not_x)
+  {
+    block->page.lock.u_x_upgrade();
+    mtr->page_lock_upgrade(*block);
+    ut_ad(id == block->page.id());
+    ut_ad(modify_clock == block->modify_clock);
+    goto func_exit;
+  }
+  else
+  {
+    fix_type= MTR_MEMO_PAGE_X_FIX;
+    ut_ad(!success || !block->page.is_io_fixed());
+  }
 
-	ut_ad(!ibuf_inside(mtr) || ibuf_page(id, block->zip_size(), NULL));
+  if (!success)
+    return false;
 
-	mtr_memo_type_t	fix_type;
+  block->page.set_accessed();
+  buf_page_make_young_if_needed(&block->page);
 
-	if (rw_latch == RW_S_LATCH) {
-		fix_type = MTR_MEMO_PAGE_S_FIX;
-		success = block->page.lock.s_lock_try();
-	} else if (block->page.lock.have_u_not_x()) {
-		block->page.lock.u_x_upgrade();
-		mtr->page_lock_upgrade(*block);
-		ut_ad(id == block->page.id());
-		ut_ad(modify_clock == block->modify_clock);
-		block->page.unfix();
-		goto func_exit;
-	} else {
-		fix_type = MTR_MEMO_PAGE_X_FIX;
-		success = block->page.lock.x_lock_try();
-		ut_ad(!success || !block->page.is_io_fixed());
-	}
+  ut_ad(!ibuf_inside(mtr) || ibuf_page(id, block->zip_size(), nullptr));
+  ut_ad(id == block->page.id());
 
-	ut_ad(id == block->page.id());
+  if (modify_clock != block->modify_clock || block->page.is_freed())
+  {
+    if (rw_latch == RW_S_LATCH)
+      block->page.lock.s_unlock();
+    else
+      block->page.lock.x_unlock();
+    return false;
+  }
 
-	if (!success) {
-		block->unfix();
-		return(FALSE);
-	}
-
-	if (modify_clock != block->modify_clock) {
-		block->unfix();
-
-		if (rw_latch == RW_S_LATCH) {
-			block->page.lock.s_unlock();
-		} else {
-			block->page.lock.x_unlock();
-		}
-
-		return(FALSE);
-	}
-
-	ut_ad(!block->page.is_read_fixed());
-	mtr_memo_push(mtr, block, fix_type);
+  block->page.fix();
+  ut_ad(!block->page.is_read_fixed());
+  mtr_memo_push(mtr, block, fix_type);
 func_exit:
 #ifdef UNIV_DEBUG
-	if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
+  if (!(++buf_dbg_counter % 5771)) buf_pool.validate();
 #endif /* UNIV_DEBUG */
-	ut_ad(block->page.buf_fix_count());
-	ut_ad(block->page.in_file());
-	ut_ad(block->page.frame);
+  ut_ad(block->page.buf_fix_count());
+  ut_ad(block->page.in_file());
+  ut_ad(block->page.frame);
 
-	++buf_pool.stat.n_page_gets;
-
-	return(TRUE);
+  ++buf_pool.stat.n_page_gets;
+  return true;
 }
 
 /** Try to S-latch a page.

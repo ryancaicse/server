@@ -181,17 +181,14 @@ error-prone programming not to set a latch, and it should be used
 with care. */
 #define buf_page_get_with_no_latch(ID, SIZE, MTR)	\
 	buf_page_get_gen(ID, SIZE, RW_NO_LATCH, NULL, BUF_GET_NO_LATCH, MTR)
-/********************************************************************//**
-This is the general function used to get optimistic access to a database
-page.
-@return TRUE if success */
-ibool
-buf_page_optimistic_get(
-/*====================*/
-	ulint		rw_latch,/*!< in: RW_S_LATCH, RW_X_LATCH */
-	buf_block_t*	block,	/*!< in: guessed block */
-	ib_uint64_t	modify_clock,/*!< in: modify clock value */
-	mtr_t*		mtr);	/*!< in: mini-transaction */
+/** Try to acquire a page latch.
+@param rw_latch      RW_S_LATCH or RW_X_LATCH
+@param block         guessed block
+@param modify_clock  expected value of block->modify_clock
+@param mtr           mini-transaction
+@return whether the latch was acquired (the page is an allocated file page) */
+bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
+                             uint64_t modify_clock, mtr_t *mtr);
 
 /** Try to S-latch a page.
 Suitable for using when holding the lock_sys latches (as it avoids deadlock).
