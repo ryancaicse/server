@@ -750,13 +750,19 @@ public:
 
   void set_ibuf_exist()
   {
+    ut_ad(lock.is_write_locked());
     ut_ad(id() < page_id_t(SRV_SPACE_ID_UPPER_BOUND, 0));
-    ut_d(const auto s=) zip.fix.fetch_add(IBUF_EXIST - UNFIXED);
+    const auto s= state();
     ut_ad(s >= UNFIXED);
-    ut_ad(s < IBUF_EXIST);
+    ut_ad(s < READ_FIX);
+    ut_ad(s < IBUF_EXIST || s >= REINIT);
+    ut_d(const auto s2=) zip.fix.fetch_add(IBUF_EXIST - (LRU_MASK & s));
+    ut_ad(s == s2);
   }
   void clear_ibuf_exist()
   {
+    ut_ad(lock.is_write_locked());
+    ut_ad(id() < page_id_t(SRV_SPACE_ID_UPPER_BOUND, 0));
     ut_d(const auto s=) zip.fix.fetch_sub(IBUF_EXIST - UNFIXED);
     ut_ad(s >= IBUF_EXIST);
     ut_ad(s < REINIT);
