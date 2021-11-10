@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2020, MariaDB
+   Copyright (c) 2010, 2020, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -5086,10 +5086,38 @@ opt_part_option:
           { Lex->part_info->curr_part_elem->index_file_name= $4.str; }
         | COMMENT_SYM opt_equal TEXT_STRING_sys
           { Lex->part_info->curr_part_elem->part_comment= $3.str; }
-        | IDENT_sys equal TEXT_STRING_sys {}
-        | IDENT_sys equal ident {}
-        | IDENT_sys equal real_ulonglong_num {}
-        | IDENT_sys equal DEFAULT {}
+        | IDENT_sys equal TEXT_STRING_sys
+          {
+            if (unlikely($3.length > ENGINE_OPTION_MAX_LENGTH))
+              my_yyabort_error((ER_VALUE_TOO_LONG, MYF(0), $1.str));
+            (void) new (thd->mem_root)
+                   engine_option_value($1, $3, true,
+                                       &Lex->part_info->curr_part_elem->option_list,
+                                       &Lex->part_info->curr_part_elem->option_list_last);
+          }
+        | IDENT_sys equal ident
+          {
+            if (unlikely($3.length > ENGINE_OPTION_MAX_LENGTH))
+              my_yyabort_error((ER_VALUE_TOO_LONG, MYF(0), $1.str));
+            (void) new (thd->mem_root)
+                   engine_option_value($1, $3, false,
+                                       &Lex->part_info->curr_part_elem->option_list,
+                                       &Lex->part_info->curr_part_elem->option_list_last);
+          }
+        | IDENT_sys equal real_ulonglong_num
+          {
+            (void) new (thd->mem_root)
+                   engine_option_value($1, $3,
+                                       &Lex->part_info->curr_part_elem->option_list,
+                                       &Lex->part_info->curr_part_elem->option_list_last,
+                                       thd->mem_root);
+          }
+        | IDENT_sys equal DEFAULT
+          {
+            (void) new (thd->mem_root)
+                   engine_option_value($1, &Lex->part_info->curr_part_elem->option_list,
+                                       &Lex->part_info->curr_part_elem->option_list_last);
+          }
         ;
 
 opt_versioning_rotation:

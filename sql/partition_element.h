@@ -126,6 +126,9 @@ public:
   bool empty;
   elem_type_enum type;
 
+  engine_option_value *option_list;       // create options for partition
+  engine_option_value *option_list_last;  // helper pointer for parsing options for
+
   partition_element()
   : part_max_rows(0), part_min_rows(0), range_value(0),
     partition_name(NULL),
@@ -136,7 +139,8 @@ public:
     signed_flag(FALSE), max_value(FALSE),
     id(UINT_MAX32),
     empty(true),
-    type(CONVENTIONAL)
+    type(CONVENTIONAL),
+    option_list(NULL), option_list_last(NULL)
   {}
   partition_element(partition_element *part_elem)
   : part_max_rows(part_elem->part_max_rows),
