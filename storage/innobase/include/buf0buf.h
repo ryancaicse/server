@@ -768,6 +768,15 @@ public:
     ut_ad(s < REINIT);
   }
 
+  void read_unfix(uint32_t s)
+  {
+    ut_ad(lock.is_write_locked());
+    ut_ad(s == UNFIXED + 1 || s == IBUF_EXIST + 1 || s == REINIT + 1);
+    ut_d(auto old_state=) zip.fix.fetch_add(s - READ_FIX);
+    ut_ad(old_state >= READ_FIX);
+    ut_ad(old_state < WRITE_FIX);
+  }
+
   void set_freed(uint32_t prev_state, uint32_t count= 0)
   {
     ut_ad(lock.is_write_locked());
@@ -779,7 +788,7 @@ public:
 
   void fix_and_set_freed(uint32_t count) { set_freed(state(), count); }
 
-  inline void set_state(uint32_t count);
+  inline void set_state(uint32_t s);
   inline void set_corrupt_id();
 
   /** @return the log sequence number of the oldest pending modification
@@ -1976,12 +1985,12 @@ inline void page_hash_latch::lock()
 }
 #endif /* SUX_LOCK_GENERIC */
 
-inline void buf_page_t::set_state(uint32_t count)
+inline void buf_page_t::set_state(uint32_t s)
 {
   mysql_mutex_assert_owner(&buf_pool.mutex);
-  ut_ad(count <= REMOVE_HASH || count >= UNFIXED);
-  ut_ad(count < READ_FIX);
-  zip.fix= count;
+  ut_ad(s <= REMOVE_HASH || s >= UNFIXED);
+  ut_ad(s <= READ_FIX);
+  zip.fix= s;
 }
 
 inline void buf_page_t::set_corrupt_id()
