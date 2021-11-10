@@ -2700,7 +2700,7 @@ got_block:
 		Only in buf_page_get_gen() and buf_page_get_low()
 		we are violating that principle. */
 		for (;;) {
-			switch (ut_d(const auto s =) block->page.state()) {
+			switch (const auto s = block->page.state()) {
 			case buf_page_t::UNFIXED + 1:
 			case buf_page_t::IBUF_EXIST + 1:
 			case buf_page_t::REINIT + 1:
@@ -2708,7 +2708,7 @@ got_block:
 			default:
 				ut_ad(s < buf_page_t::READ_FIX);
 
-				if (s < buf_page_t::UNFIXED) {
+				if (s < buf_page_t::UNFIXED + 1) {
 					ut_ad(s > buf_page_t::FREED);
 					block->page.unfix();
 					block->page.lock.x_unlock();
