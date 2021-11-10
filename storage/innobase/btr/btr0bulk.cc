@@ -873,7 +873,7 @@ PageBulk::latch()
 		ut_ad(m_block != NULL);
 	}
 
-	ut_d(const auto buf_fix_count = m_block->page.unfix());
+	ut_d(const auto buf_fix_count =) m_block->page.unfix();
 
 	ut_ad(buf_fix_count);
 	ut_ad(m_cur_rec > m_page);
